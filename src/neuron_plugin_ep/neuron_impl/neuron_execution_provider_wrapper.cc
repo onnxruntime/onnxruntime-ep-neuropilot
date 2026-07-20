@@ -1,0 +1,1007 @@
+// neuron_execution_provider_wrapper.cc  (Plugin EP – refactored)
+//
+// Implements the NeuronWrapper_* C interface declared in
+// ../src/neuron_execution_provider_wrapper.h.
+//
+// KEY ARCHITECTURAL CHANGE FROM THE ORIGINAL:
+//   The original file cast OrtGraph* → const onnxruntime::GraphViewer* via
+//   reinterpret_cast, then called NeuronExecutionProvider (an IExecutionProvider
+//   subclass) which required dozens of ORT internal headers.
+//
+//   This refactored version:
+//     1. Uses ort_graph_to_proto.h (header-only) to convert OrtGraph* →
+//        onnx::GraphProto WITHOUT any ORT internal headers.
+//     2. Builds a NeuronGraphContext from the proto (a lightweight lookup table).
+//     3. Calls NeuronGraphCompiler (new class, no IExecutionProvider) which
+//        determines supported ops and compiles the Neuron model.
+//
+//   There is NO reinterpret_cast to internal ORT types anywhere.
+
+#define ORT_EP_UTILS_ORT_GRAPH_TO_PROTO_IMPL
+#include "ort_graph_to_proto.h"   // header-only utility – copy from TRT EP
+
+#define ORT_API_MANUAL_INIT
+#include "onnxruntime_cxx_api.h"
+#undef ORT_API_MANUAL_INIT
+
+#include "../neuron_execution_provider_wrapper.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <onnx/onnx_pb.h>
+
+#include "neuron_graph_context.h"
+#include "builders/helper.h"
+#include "builders/neuron_model_builder.h"
+#include "builders/op_builder.h"
+#include "builders/op_builder_factory.h"
+#include "neuron_lib/neuron_implementation.h"
+#include "neuron_lib/neuron_wrapper_device.h"
+#include "neuron_lib/neuron_wrapper_model.h"
+#include "../neuron_provider_factory.h"
+
+namespace {
+// Bring onnxruntime into scope so that unqualified `neuron::wrapper::...`
+// resolves to `onnxruntime::neuron::wrapper::...` throughout this file.
+using namespace onnxruntime;
+
+// ============================================================================
+// NeuronWrapperState
+// Per-session state.  No longer owns a NeuronExecutionProvider (which was an
+// IExecutionProvider subclass); owns the raw Neuron SDK handle instead.
+// ============================================================================
+struct NeuronWrapperState {
+  const OrtApi*            ort_api{nullptr};
+  const OrtEpApi*          ep_api{nullptr};
+  const OrtModelEditorApi* model_editor_api{nullptr};
+
+  // Provider option flags (copied from OrtKeyValuePairs at Create time).
+  uint32_t neuron_flags{0};
+  uint32_t min_group_size{1};
+  std::string optimization_string;
+  std::unordered_set<std::string> force_skip_ops;
+
+  // Neuron SDK handle.
+  const NeuronApi* neuron_handle{nullptr};
+  NeuronRuntimeVersion neuron_version{1, 0, 0};
+  neuron::wrapper::DeviceVector neuron_target_devices;
+  neuron::wrapper::TargetDeviceOption target_device_option{
+      neuron::wrapper::TargetDeviceOption::ALL_DEVICES};
+
+  // Map from fused-node name → compiled Neuron model (filled by Compile).
+  std::unordered_map<std::string, std::unique_ptr<neuron::wrapper::Model>> neuron_models;
+};
+
+// ============================================================================
+// NeuronComputeState
+// Per-thread compute state created once by CreateStateImpl and reused across
+// every inference call.  Caches all static metadata so ComputeImpl does zero
+// heap allocations and zero ORT type-query calls per inference.
+// ============================================================================
+struct NeuronComputeState {
+  std::unique_ptr<neuron::wrapper::Execution> execution;
+
+  struct InputInfo {
+    size_t ort_idx;    // which ORT input slot maps to this model input
+    size_t byte_size;  // pre-computed, constant for static shapes
+  };
+  struct OutputInfo {
+    size_t ort_idx;
+    size_t byte_size;
+    std::vector<int64_t> shape_i64;  // pre-built for ctx.GetOutput(); empty for scalars
+  };
+  std::vector<InputInfo>  input_infos;
+  std::vector<OutputInfo> output_infos;
+};
+
+// ============================================================================
+// NeuronNodeComputeInfo
+// Wraps the per-fused-node execution state for the OrtNodeComputeInfo vtable.
+// ============================================================================
+struct NeuronNodeComputeInfo : OrtNodeComputeInfo {
+  NeuronWrapperState* state{nullptr};
+  std::string fused_node_name;
+  const OrtApi* ort_api{nullptr};
+
+  NeuronNodeComputeInfo(NeuronWrapperState* s, std::string name, const OrtApi* api)
+      : state(s), fused_node_name(std::move(name)), ort_api(api) {
+    ort_version_supported = ORT_API_VERSION;
+    CreateState  = CreateStateImpl;
+    Compute      = ComputeImpl;
+    ReleaseState = ReleaseStateImpl;
+  }
+
+  // CreateState is called once per inference thread / execution context.
+  // We build a NeuronComputeState here so ComputeImpl pays zero allocation cost.
+  static OrtStatus* ORT_API_CALL CreateStateImpl(
+      OrtNodeComputeInfo* this_ptr,
+      OrtNodeComputeContext* /*ort_ctx*/,
+      void** out_state) {
+    auto* self = static_cast<NeuronNodeComputeInfo*>(this_ptr);
+    auto it = self->state->neuron_models.find(self->fused_node_name);
+    if (it == self->state->neuron_models.end()) {
+      return self->ort_api->CreateStatus(ORT_EP_FAIL,
+          "NeuronEP: compiled model not found for node");
+    }
+    auto* model = it->second.get();
+
+    auto* cs = new (std::nothrow) NeuronComputeState{};
+    if (!cs) return self->ort_api->CreateStatus(ORT_EP_FAIL, "NeuronEP: OOM in CreateState");
+
+    // Create a dedicated NeuronExecution for this state.
+    // Each state owns its execution so no mutex is needed at inference time.
+    auto ns = model->PrepareForExecution(cs->execution);
+    if (!ns.IsOK()) {
+      delete cs;
+      return self->ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
+    }
+
+    // Pre-build input metadata.
+    const auto& model_inputs = model->GetInputs();
+    cs->input_infos.resize(model_inputs.size());
+    for (size_t i = 0; i < model_inputs.size(); ++i) {
+      const auto& name = model_inputs[i];
+      cs->input_infos[i].ort_idx   = model->GetMappedInputIdx(name);
+      cs->input_infos[i].byte_size = model->GetInputType(name).GetOperandBlobByteSize();
+    }
+
+    // Pre-build output metadata.
+    const auto& model_outputs = model->GetOutputs();
+    cs->output_infos.resize(model_outputs.size());
+    for (size_t i = 0; i < model_outputs.size(); ++i) {
+      const auto& name = model_outputs[i];
+      auto out_type = model->GetOutputType(name, *cs->execution);
+      if (out_type.GetOperandBlobByteSize() == 0) {
+        delete cs;
+        return self->ort_api->CreateStatus(ORT_EP_FAIL,
+            "NeuronEP: dynamic output shape not supported in this build");
+      }
+      cs->output_infos[i].ort_idx   = model->GetMappedOutputIdx(name);
+      cs->output_infos[i].byte_size = out_type.GetOperandBlobByteSize();
+      // Build the int64 shape vector once; leave empty for scalar outputs.
+      if (!model->IsScalarOutput(name)) {
+        const auto& dims = out_type.dimensions;
+        cs->output_infos[i].shape_i64.assign(dims.begin(), dims.end());
+      }
+    }
+
+    *out_state = cs;
+    return nullptr;
+  }
+
+  static OrtStatus* ORT_API_CALL ComputeImpl(
+      OrtNodeComputeInfo* this_ptr,
+      void* state_ptr,
+      OrtKernelContext* kernel_ctx) {
+    auto* self = static_cast<NeuronNodeComputeInfo*>(this_ptr);
+    auto* cs   = static_cast<NeuronComputeState*>(state_ptr);
+    Ort::KernelContext ctx(kernel_ctx);
+
+    // Set inputs — no allocations, no type queries.
+    for (size_t i = 0; i < cs->input_infos.size(); ++i) {
+      const auto& info = cs->input_infos[i];
+      auto ort_tensor = ctx.GetInput(info.ort_idx);
+      auto ns = cs->execution->SetInputFast(
+          static_cast<int32_t>(i), ort_tensor.GetTensorRawData(), info.byte_size);
+      if (!ns.IsOK())
+        return self->ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
+    }
+
+    // Set outputs — pre-built shapes, no copies.
+    for (size_t i = 0; i < cs->output_infos.size(); ++i) {
+      const auto& info = cs->output_infos[i];
+      auto ort_out = ctx.GetOutput(info.ort_idx,
+                                   info.shape_i64.data(),
+                                   info.shape_i64.size());
+      // GetTensorMutableData<uint8_t>() is a type-agnostic raw-pointer accessor;
+      // the template parameter is irrelevant — the underlying C API returns void*.
+      void* buf = ort_out.GetTensorMutableData<uint8_t>();
+      auto ns = cs->execution->SetOutputFast(
+          static_cast<int32_t>(i), buf, info.byte_size);
+      if (!ns.IsOK())
+        return self->ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
+    }
+
+    {
+      auto ns = cs->execution->Predict();
+      if (!ns.IsOK())
+        return self->ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
+    }
+    return nullptr;
+  }
+
+  static void ORT_API_CALL ReleaseStateImpl(OrtNodeComputeInfo* /*this_ptr*/,
+                                             void* state_ptr) {
+    delete static_cast<NeuronComputeState*>(state_ptr);
+  }
+};
+
+// ============================================================================
+// Helper: read a string key from OrtKeyValuePairs or return empty string.
+// ============================================================================
+static std::string GetKV(const OrtApi* ort_api,
+                          const OrtKeyValuePairs* kv,
+                          const char* key) {
+  if (!kv) return {};
+  const char* v = ort_api->GetKeyValue(kv, key);
+  return v ? std::string{v} : std::string{};
+}
+
+// ============================================================================
+// Bitset helpers for the convex partitioner (below).
+// A "word bitset" is a std::vector<uint64_t>; bit n lives in word n/64, bit n%64.
+// ============================================================================
+namespace partition_detail {
+
+inline void BitSet(std::vector<uint64_t>& bs, int n) {
+  bs[static_cast<size_t>(n) >> 6] |= (1ull << (n & 63));
+}
+inline void BitOrInto(std::vector<uint64_t>& dst, const std::vector<uint64_t>& src) {
+  for (size_t w = 0; w < dst.size(); ++w) dst[w] |= src[w];
+}
+// True if (a & b) has any bit set.
+inline bool BitAndAny(const std::vector<uint64_t>& a, const std::vector<uint64_t>& b) {
+  for (size_t w = 0; w < a.size(); ++w)
+    if (a[w] & b[w]) return true;
+  return false;
+}
+
+// Minimal union-find over node indices.
+struct DisjointSet {
+  std::vector<int> parent;
+  explicit DisjointSet(int n) : parent(static_cast<size_t>(n)) {
+    for (int i = 0; i < n; ++i) parent[static_cast<size_t>(i)] = i;
+  }
+  int Find(int x) {
+    while (parent[static_cast<size_t>(x)] != x) {
+      parent[static_cast<size_t>(x)] = parent[static_cast<size_t>(parent[static_cast<size_t>(x)])];
+      x = parent[static_cast<size_t>(x)];
+    }
+    return x;
+  }
+  void Merge(int a, int b) {
+    a = Find(a); b = Find(b);
+    if (a != b) parent[static_cast<size_t>(b)] = a;
+  }
+};
+
+}  // namespace partition_detail
+
+// ============================================================================
+// Predictive hardware-representability check (cheap; no compilation).
+//
+// Some quantized ops pass the software capability check but cannot be encoded
+// for the target hardware because their quantization parameters are degenerate.
+// The clearest case: a Conv/Gemm/MatMul whose INT32 bias has been saturated to
+// INT32_MIN/MAX during quantization (happens when the input activation scale is
+// vanishingly small, e.g. mobilenet_v3's SE block with a 4e-9 Relu scale).  The
+// MDLA compiler rejects this as "invalid constant data".  We detect it from the
+// bias initializer directly and treat the op as unsupported, so the convex
+// partitioner routes it (and only it) to CPU.
+// ============================================================================
+static bool HasSaturatedInt32Bias(const onnx::NodeProto& node,
+                                   const onnxruntime::neuron::NeuronGraphContext& ctx) {
+  const std::string& op = node.op_type();
+  if (op != "Conv" && op != "Gemm" && op != "MatMul" &&
+      op != "QLinearConv" && op != "ConvTranspose")
+    return false;
+  // Bias is input(2) for Conv/ConvTranspose/Gemm; QLinearConv bias is input(8).
+  int bias_slot = -1;
+  if (op == "QLinearConv") bias_slot = (node.input_size() > 8) ? 8 : -1;
+  else                     bias_slot = (node.input_size() > 2) ? 2 : -1;
+  if (bias_slot < 0 || node.input(bias_slot).empty()) return false;
+
+  // Resolve the bias initializer, following a DequantizeLinear if present.
+  std::string bias_name = node.input(bias_slot);
+  if (const auto* prod = ctx.GetProducer(bias_name)) {
+    if (prod->op_type() == "DequantizeLinear" && prod->input_size() > 0)
+      bias_name = prod->input(0);
+  }
+  const auto* init = ctx.GetInitializer(bias_name);
+  if (!init || init->data_type() != onnx::TensorProto::INT32) return false;
+
+  std::vector<int32_t> vals;
+  if (!onnxruntime::neuron::NeuronGraphContext::GetInt32Data(*init, vals).IsOK())
+    return false;
+  for (int32_t v : vals)
+    if (v == INT32_MIN || v == INT32_MAX) return true;
+  return false;
+}
+
+// ============================================================================
+// Helper: determine which nodes in the graph are supported and partition them.
+// Returns a list of node index groups (each group is one fused subgraph).
+//
+// Two phases:
+//   Phase A — per-node support determination.  Each node is judged in
+//     isolation (op-builder support, standalone-DQ/Q rejection, live-INT64
+//     rejection).  Absorbed DQ/Q nodes inherit their QDQ target's verdict.
+//     No greedy "flush on interruption" logic — support is independent of
+//     grouping.
+//
+//   Phase B — maximal convex partitioning.  Supported nodes are grouped into
+//     the fewest partitions such that each partition is CONVEX: no unsupported
+//     node lies on any path between two nodes of the same partition.  This is
+//     the invariant ORT's utils::CreateSupportedPartitions enforces and that
+//     ep_plugin_provider_interfaces.cc requires of EpGraphSupportInfo_
+//     AddNodesToFuse (a group that is non-convex is rejected wholesale).
+//
+//     Convexity is tested with node-reachability bitsets: the union of two
+//     partitions is convex iff no unsupported node u is simultaneously
+//     reachable-from a member (u in outReach) and can-reach a member
+//     (u in inReach).  Merging maximally along supported producer→consumer
+//     edges yields the minimum number of partitions, which minimises the
+//     number of separate Neuron model compile/execute round-trips.
+//
+// QDQ handling:
+//   NeuronGraphContext::DetectQDQGroups() (called in the ctor) identifies
+//   DQ→Op→Q patterns and stores them in ctx.qdq_groups /
+//   ctx.qdq_absorbed_node_indices.  Each group's DQ + target + Q nodes are
+//   pre-unioned into one atomic unit so a QDQ group is never split across
+//   partitions.  Unlike the previous implementation, QDQ groups ARE merged
+//   with neighbouring supported ops whenever doing so stays convex — a chain
+//   of quantized layers becomes ONE Neuron model instead of N.
+// ============================================================================
+static std::vector<std::vector<int>> FindSupportedGroups(
+    const onnx::GraphProto& graph_proto,
+    const NeuronWrapperState* state) {
+
+  using namespace onnxruntime::neuron;
+  using namespace partition_detail;
+
+  // NeuronGraphContext constructor runs DetectQDQGroups internally.
+  NeuronGraphContext ctx(graph_proto);
+
+  const int N = graph_proto.node_size();
+  std::vector<std::vector<int>> groups;
+  if (N == 0) return groups;
+
+  const auto& op_builders = GetOpBuilders();
+
+  OpSupportCheckParams check_params;
+  check_params.version  = state->neuron_version;
+  check_params.devices  = state->neuron_target_devices;
+  check_params.use_nchw = (state->neuron_flags & NEURON_FLAG_USE_NCHW) != 0;
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Phase A: per-node support determination (independent of grouping).
+  // ──────────────────────────────────────────────────────────────────────
+  std::vector<char> supported(static_cast<size_t>(N), 0);
+
+  for (int i = 0; i < N; ++i) {
+    const auto& node = graph_proto.node(i);
+    const std::string& op = node.op_type();
+
+    // Absorbed DQ/Q nodes inherit their target's verdict — handled in Phase A2.
+    if (ctx.qdq_absorbed_node_indices.count(i)) continue;
+
+    // Force-skipped ops.
+    if (state->force_skip_ops.count(op)) continue;
+
+    // Standalone (non-absorbed) DQ/Q are never claimed: a single-node DQ/Q
+    // subgraph has no op to lower and hangs the Neuron SDK at compile time.
+    if (op == "DequantizeLinear" || op == "QuantizeLinear") continue;
+
+    // Op-builder support check.
+    const auto it = op_builders.find(op);
+    if (it == op_builders.end() ||
+        !it->second->IsOpSupported(node, ctx, check_params)) {
+      continue;
+    }
+
+    // Find this node's QDQ group (for the own-DQ INT64 allowance).
+    const QDQNodeGroup* qdq = nullptr;
+    for (const auto& out : node.output()) {
+      if (!out.empty()) { qdq = ctx.GetQDQGroup(out); if (qdq) break; }
+    }
+
+    // Live INT64 input check.  Neuron cannot represent INT64 operands, and an
+    // INT64 tensor crossing a partition boundary is unrepresentable.  We reject
+    // any node with a live (non-initializer) INT64 input other than one coming
+    // from this node's own absorbed DQ.  This is a hard invariant, so it is
+    // enforced per-node here rather than relying on grouping.
+    bool has_live_int64 = false;
+    for (const auto& inp : node.input()) {
+      if (inp.empty() || ctx.IsInitializer(inp)) continue;
+      bool from_own_dq = false;
+      if (qdq) {
+        for (int dq_idx : qdq->dq_node_indices) {
+          for (const auto& dq_out : graph_proto.node(dq_idx).output())
+            if (dq_out == inp) { from_own_dq = true; break; }
+          if (from_own_dq) break;
+        }
+      }
+      if (from_own_dq) continue;
+      if (ctx.GetElementType(inp) == onnx::TensorProto::INT64) {
+        LOGS_NEURON(VERBOSE) << "Node [" << node.name() << "] op_type [" << op
+                             << "]: live INT64 input '" << inp
+                             << "' — falling back to CPU";
+        has_live_int64 = true;
+        break;
+      }
+    }
+    if (has_live_int64) continue;
+
+    // Degenerate quantization the hardware cannot encode (e.g. saturated INT32
+    // bias) → leave on CPU rather than fail the whole session at compile time.
+    if (HasSaturatedInt32Bias(node, ctx)) {
+      LOGS_NEURON(WARNING) << "Node [" << node.name() << "] op [" << op
+                           << "] has a saturated INT32 bias (degenerate quant "
+                              "scale) — leaving on CPU";
+      continue;
+    }
+
+    supported[static_cast<size_t>(i)] = 1;
+  }
+
+  // Phase A2: absorbed DQ/Q inherit their QDQ target's support verdict.
+  for (const auto& kv : ctx.qdq_groups) {
+    const QDQNodeGroup& g = kv.second;
+    const int t = g.target_node_index;
+    if (t < 0 || t >= N || !supported[static_cast<size_t>(t)]) continue;
+    for (int d : g.dq_node_indices)
+      if (d >= 0 && d < N) supported[static_cast<size_t>(d)] = 1;
+    for (int q : g.q_node_indices)
+      if (q >= 0 && q < N) supported[static_cast<size_t>(q)] = 1;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Phase B: maximal convex partitioning of the supported node set.
+  // ──────────────────────────────────────────────────────────────────────
+
+  // Producer map: output name → node index.
+  std::unordered_map<std::string, int> out_to_idx;
+  out_to_idx.reserve(static_cast<size_t>(N) * 2);
+  for (int i = 0; i < N; ++i)
+    for (const auto& o : graph_proto.node(i).output())
+      if (!o.empty()) out_to_idx.emplace(o, i);
+
+  // Adjacency (data dependencies) over ALL nodes — convexity depends on
+  // unsupported nodes lying between supported ones.
+  std::vector<std::vector<int>> succ(static_cast<size_t>(N));
+  std::vector<std::pair<int, int>> edges;  // (producer, consumer)
+  for (int i = 0; i < N; ++i) {
+    for (const auto& in : graph_proto.node(i).input()) {
+      if (in.empty()) continue;
+      auto it = out_to_idx.find(in);
+      if (it == out_to_idx.end()) continue;
+      const int p = it->second;
+      if (p == i) continue;
+      succ[static_cast<size_t>(p)].push_back(i);
+      edges.emplace_back(p, i);
+    }
+  }
+
+  const int W = (N + 63) / 64;
+
+  // desc[i] = set of nodes reachable FROM i (strict descendants).
+  // anc[i]  = set of nodes that can reach i (strict ancestors).
+  // Computed via a single pass each over the topological order.
+  std::vector<std::vector<uint64_t>> desc(
+      static_cast<size_t>(N), std::vector<uint64_t>(static_cast<size_t>(W), 0));
+  std::vector<std::vector<uint64_t>> anc(
+      static_cast<size_t>(N), std::vector<uint64_t>(static_cast<size_t>(W), 0));
+
+  // Descendants: reverse topological order.
+  for (auto ti = static_cast<int>(ctx.topo_order.size()) - 1; ti >= 0; --ti) {
+    const int i = ctx.topo_order[static_cast<size_t>(ti)];
+    if (i < 0 || i >= N) continue;
+    auto& di = desc[static_cast<size_t>(i)];
+    for (int s : succ[static_cast<size_t>(i)]) {
+      BitSet(di, s);
+      BitOrInto(di, desc[static_cast<size_t>(s)]);
+    }
+  }
+  // Ancestors: forward topological order (predecessor = any node whose desc
+  // contains i is expensive; instead accumulate from succ edges).
+  for (int ti = 0; ti < static_cast<int>(ctx.topo_order.size()); ++ti) {
+    const int i = ctx.topo_order[static_cast<size_t>(ti)];
+    if (i < 0 || i >= N) continue;
+    // For each successor s of i, i (and i's ancestors) are ancestors of s.
+    auto& ai = anc[static_cast<size_t>(i)];
+    for (int s : succ[static_cast<size_t>(i)]) {
+      auto& as = anc[static_cast<size_t>(s)];
+      BitSet(as, i);
+      BitOrInto(as, ai);
+    }
+  }
+
+  // Unsupported-node bitset.
+  std::vector<uint64_t> unsupported(static_cast<size_t>(W), 0);
+  for (int i = 0; i < N; ++i)
+    if (!supported[static_cast<size_t>(i)]) BitSet(unsupported, i);
+
+  // Union-find seeded with QDQ atomic units (DQ + target + Q kept together).
+  DisjointSet dsu(N);
+  for (const auto& kv : ctx.qdq_groups) {
+    const QDQNodeGroup& g = kv.second;
+    const int t = g.target_node_index;
+    if (t < 0 || t >= N || !supported[static_cast<size_t>(t)]) continue;
+    for (int d : g.dq_node_indices)
+      if (d >= 0 && d < N && supported[static_cast<size_t>(d)]) dsu.Merge(t, d);
+    for (int q : g.q_node_indices)
+      if (q >= 0 && q < N && supported[static_cast<size_t>(q)]) dsu.Merge(t, q);
+  }
+
+  // Per-root aggregate reachability, indexed by node (valid only at roots).
+  //   mem      = member set of the partition
+  //   outReach = union of desc[m] over members (nodes reachable FROM partition)
+  //   inReach  = union of anc[m]  over members (nodes that can reach partition)
+  std::vector<std::vector<uint64_t>> mem(static_cast<size_t>(N)),
+      out_reach(static_cast<size_t>(N)), in_reach(static_cast<size_t>(N));
+  auto init_root = [&](int r) {
+    mem[static_cast<size_t>(r)].assign(static_cast<size_t>(W), 0);
+    out_reach[static_cast<size_t>(r)].assign(static_cast<size_t>(W), 0);
+    in_reach[static_cast<size_t>(r)].assign(static_cast<size_t>(W), 0);
+  };
+  for (int i = 0; i < N; ++i) {
+    if (!supported[static_cast<size_t>(i)]) continue;
+    const int r = dsu.Find(i);
+    if (mem[static_cast<size_t>(r)].empty()) init_root(r);
+    BitSet(mem[static_cast<size_t>(r)], i);
+    BitOrInto(out_reach[static_cast<size_t>(r)], desc[static_cast<size_t>(i)]);
+    BitOrInto(in_reach[static_cast<size_t>(r)], anc[static_cast<size_t>(i)]);
+  }
+
+  // A candidate partition is convex iff no unsupported node lies between two
+  // members: (outReach ∩ inReach ∩ unsupported) is empty.  No allocation — this
+  // runs once per edge per fixpoint pass.
+  auto union_is_convex = [&](int ra, int rb) -> bool {
+    const auto& oa = out_reach[static_cast<size_t>(ra)];
+    const auto& ob = out_reach[static_cast<size_t>(rb)];
+    const auto& ia = in_reach[static_cast<size_t>(ra)];
+    const auto& ib = in_reach[static_cast<size_t>(rb)];
+    for (int w = 0; w < W; ++w) {
+      const uint64_t o  = oa[static_cast<size_t>(w)] | ob[static_cast<size_t>(w)];
+      const uint64_t in = ia[static_cast<size_t>(w)] | ib[static_cast<size_t>(w)];
+      if (o & in & unsupported[static_cast<size_t>(w)]) return false;
+    }
+    return true;
+  };
+
+  // Merge maximally along supported producer→consumer edges until fixpoint.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto& e : edges) {
+      const int a = e.first, b = e.second;
+      if (!supported[static_cast<size_t>(a)] || !supported[static_cast<size_t>(b)]) continue;
+      const int ra = dsu.Find(a), rb = dsu.Find(b);
+      if (ra == rb) continue;
+      if (!union_is_convex(ra, rb)) continue;
+      // Commit the merge: fold rb's aggregate into ra.
+      BitOrInto(mem[static_cast<size_t>(ra)], mem[static_cast<size_t>(rb)]);
+      BitOrInto(out_reach[static_cast<size_t>(ra)], out_reach[static_cast<size_t>(rb)]);
+      BitOrInto(in_reach[static_cast<size_t>(ra)], in_reach[static_cast<size_t>(rb)]);
+      dsu.Merge(ra, rb);
+      // dsu.Merge makes ra the parent (Merge(a,b) sets parent[b]=a), so ra
+      // remains the representative and its aggregate is authoritative.
+      changed = true;
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Collect partitions: bucket supported nodes by root, emit in topo order.
+  // ──────────────────────────────────────────────────────────────────────
+  std::unordered_map<int, std::vector<int>> root_to_nodes;
+  for (int i : ctx.topo_order) {
+    if (i < 0 || i >= N || !supported[static_cast<size_t>(i)]) continue;
+    root_to_nodes[dsu.Find(i)].push_back(i);
+  }
+  // Also include any supported nodes not present in topo_order (defensive).
+  for (int i = 0; i < N; ++i) {
+    if (!supported[static_cast<size_t>(i)]) continue;
+    const int r = dsu.Find(i);
+    auto& v = root_to_nodes[r];
+    if (std::find(v.begin(), v.end(), i) == v.end()) v.push_back(i);
+  }
+
+  // A partition must have at least one real (non-constant) boundary input.
+  // Neuron's identifyInputsAndOutputs() fails with NEURON_UNEXPECTED_NULL on a
+  // subgraph with zero inputs, and an all-constant subgraph (e.g. a Concat of
+  // Unsqueezed shape constants) belongs on CPU / constant-folding, not on the
+  // NPU.  This mirrors the shared provider's GetCapability filter that resets
+  // any ComputeCapability whose inputs are all constant initializers.
+  auto partition_has_real_input = [&](const std::vector<int>& nodes) -> bool {
+    std::unordered_set<std::string> internal_outputs;
+    for (int idx : nodes)
+      for (const auto& o : graph_proto.node(idx).output())
+        if (!o.empty()) internal_outputs.insert(o);
+    for (int idx : nodes) {
+      for (const auto& in : graph_proto.node(idx).input()) {
+        if (in.empty() || ctx.IsInitializer(in)) continue;
+        if (internal_outputs.count(in)) continue;  // produced inside partition
+        return true;                                // a real external input
+      }
+    }
+    return false;
+  };
+
+  // A partition is only worth an NPU dispatch if it contains at least one
+  // compute-heavy op (conv / matmul / gemm / attention / recurrent family).
+  // Partitions made purely of memory-bound movement/elementwise ops (Reshape,
+  // Transpose, Concat, Add, Sub, Slice, …) — e.g. a detection head's DFL/anchor
+  // decode — cost more in Neuron dispatch + NPU<->CPU tensor round-trips than
+  // they save, so they run faster left on CPU.  Dropping them here keeps the
+  // conv backbone on the NPU while the decode stays on CPU as one region.
+  static const std::unordered_set<std::string> kHeavyOps = {
+      "Conv", "QLinearConv", "ConvTranspose", "ConvInteger",
+      "Gemm", "MatMul", "QLinearMatMul", "MatMulInteger", "MatMulNBits",
+      "FusedMatMul", "FusedConv",
+      "LSTM", "GRU", "RNN",
+      "Attention", "MultiHeadAttention", "GroupQueryAttention",
+  };
+  auto partition_has_heavy_op = [&](const std::vector<int>& nodes) -> bool {
+    for (int idx : nodes)
+      if (kHeavyOps.count(graph_proto.node(idx).op_type())) return true;
+    return false;
+  };
+
+  // A final partition must be convex: no unsupported node may lie on a path
+  // between two of its members.  The convex-merge loop guarantees this for
+  // merges it performs, but the QDQ atomic seeding (which force-unions a shared
+  // DQ with all its consumer targets) can in principle produce a non-convex
+  // seed.  ORT rejects the ENTIRE EP's capability if any AddNodesToFuse group is
+  // non-convex, so we defensively drop such a partition to CPU instead.
+  auto partition_is_convex = [&](int root) -> bool {
+    const auto& o  = out_reach[static_cast<size_t>(root)];
+    const auto& in = in_reach[static_cast<size_t>(root)];
+    for (int w = 0; w < W; ++w)
+      if (o[static_cast<size_t>(w)] & in[static_cast<size_t>(w)] &
+          unsupported[static_cast<size_t>(w)])
+        return false;
+    return true;
+  };
+
+  groups.reserve(root_to_nodes.size());
+  for (auto& kv : root_to_nodes) {
+    if (kv.second.size() < state->min_group_size) continue;
+    if (!partition_has_real_input(kv.second)) {
+      LOGS_NEURON(VERBOSE) << "Dropping all-constant partition (size "
+                           << kv.second.size() << ") — no non-constant input";
+      continue;
+    }
+    if (!partition_is_convex(kv.first)) {
+      LOGS_NEURON(WARNING) << "Dropping non-convex partition (size "
+                           << kv.second.size()
+                           << ") — falling back to CPU to avoid rejecting all capability";
+      continue;
+    }
+    if (!partition_has_heavy_op(kv.second)) {
+      LOGS_NEURON(VERBOSE) << "Dropping compute-light partition (size "
+                           << kv.second.size()
+                           << ") — no conv/matmul; runs faster on CPU than as an NPU dispatch";
+      continue;
+    }
+    groups.push_back(std::move(kv.second));
+  }
+
+  return groups;
+}
+
+}  // anonymous namespace
+
+// ============================================================================
+// NeuronWrapper_* implementations (C interface)
+// ============================================================================
+
+extern "C" {
+
+// ---------------------------------------------------------------------------
+// NeuronWrapper_Create
+// ---------------------------------------------------------------------------
+NeuronWrapperHandle NeuronWrapper_Create(
+    const OrtApi*            ort_api,
+    const OrtEpApi*          ep_api,
+    const OrtModelEditorApi* model_editor_api,
+    const OrtKeyValuePairs*  provider_options) {
+
+  auto* s = new (std::nothrow) NeuronWrapperState{};
+  if (!s) return nullptr;
+
+  s->ort_api          = ort_api;
+  s->ep_api           = ep_api;
+  s->model_editor_api = model_editor_api;
+
+  // Parse provider options.
+  auto get = [&](const char* k) { return GetKV(ort_api, provider_options, k); };
+  if (get("NEURON_FLAG_USE_FP16")     == "1") s->neuron_flags |= NEURON_FLAG_USE_FP16;
+  if (get("NEURON_FLAG_USE_NCHW")     == "1") s->neuron_flags |= NEURON_FLAG_USE_NCHW;
+  if (get("NEURON_FLAG_CPU_DISABLED") == "1") s->neuron_flags |= NEURON_FLAG_CPU_DISABLED;
+  if (get("NEURON_FLAG_CPU_ONLY")     == "1") s->neuron_flags |= NEURON_FLAG_CPU_ONLY;
+
+  auto min_gs = get("NEURON_FLAG_MIN_GROUP_SIZE");
+  if (!min_gs.empty()) s->min_group_size = static_cast<uint32_t>(std::stoi(min_gs));
+
+  s->optimization_string = get("NEURON_FLAG_OPTIMIZATION_STRING");
+
+  // Force-skip ops.
+  auto skip_str = get("NEURON_FLAG_FORCE_SKIP_OPS_STRING");
+  if (!skip_str.empty()) {
+    std::istringstream ss(skip_str);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+      if (!token.empty()) s->force_skip_ops.insert(token);
+    }
+  }
+
+  // Neuron SDK handle.
+  s->neuron_handle = NeuronApiImplementation();
+  if (!s->neuron_handle) { delete s; return nullptr; }
+  if (s->neuron_handle->Neuron_getVersion(&s->neuron_version) != NEURON_NO_ERROR) {
+    delete s; return nullptr;
+  }
+
+  bool cpu_disabled = s->neuron_flags & NEURON_FLAG_CPU_DISABLED;
+  bool cpu_only     = s->neuron_flags & NEURON_FLAG_CPU_ONLY;
+
+  if (cpu_disabled && cpu_only) { delete s; return nullptr; }
+
+  s->target_device_option = neuron::wrapper::TargetDeviceOption::ALL_DEVICES;
+  if (cpu_disabled) s->target_device_option = neuron::wrapper::TargetDeviceOption::CPU_DISABLED;
+  else if (cpu_only) s->target_device_option = neuron::wrapper::TargetDeviceOption::CPU_ONLY;
+
+  auto ns = onnxruntime::neuron::wrapper::GetTargetDevices(
+      *s->neuron_handle, s->target_device_option, s->neuron_target_devices);
+  if (!ns.IsOK()) { delete s; return nullptr; }
+
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// NeuronWrapper_Destroy
+// ---------------------------------------------------------------------------
+void NeuronWrapper_Destroy(NeuronWrapperHandle handle) {
+  delete static_cast<NeuronWrapperState*>(handle);
+}
+
+// ---------------------------------------------------------------------------
+// NeuronWrapper_GetCapability
+//
+// KEY CHANGE: Uses ort_graph_to_proto.h to convert OrtGraph* → onnx::GraphProto.
+// NO reinterpret_cast to ORT internal types.
+// ---------------------------------------------------------------------------
+OrtStatus* NeuronWrapper_GetCapability(
+    NeuronWrapperHandle    handle,
+    const OrtApi*          ort_api,
+    const OrtEpApi*        ep_api,
+    const OrtGraph*        graph,
+    OrtEpGraphSupportInfo* support_info) try {
+
+  auto* state = static_cast<NeuronWrapperState*>(handle);
+
+  // Convert OrtGraph* → onnx::GraphProto using public utility.
+  // This is the replacement for reinterpret_cast<const GraphViewer*>(graph).
+  onnx::GraphProto graph_proto;
+  {
+    OrtStatus* st = OrtEpUtils::OrtGraphToProto(*graph, graph_proto);
+    if (st) return st;
+  }
+
+  // Find supported node groups.
+  const auto groups = FindSupportedGroups(graph_proto, state);
+
+  {
+    size_t supported_nodes = 0;
+    for (const auto& g : groups) supported_nodes += g.size();
+    LOGS_NEURON(INFO) << "NeuronEP GetCapability: partitions=" << groups.size()
+                      << " supported_nodes=" << supported_nodes
+                      << " total_nodes=" << graph_proto.node_size();
+  }
+
+  if (groups.empty()) return nullptr;
+
+  // Build a table of all OrtNode* pointers in graph order.
+  // OrtGraphToProto serialises nodes via ort_graph.GetNodes() which iterates in
+  // the same order as Graph_GetNode(graph, i, …), so graph_proto.node(i)
+  // corresponds to all_ort_nodes[i].  We additionally build a name→index map
+  // for a name-based cross-check on nodes that do carry names.
+  size_t num_graph_nodes = 0;
+  ort_api->Graph_GetNumNodes(graph, &num_graph_nodes);
+
+  std::vector<const OrtNode*> all_ort_nodes(num_graph_nodes, nullptr);
+  ort_api->Graph_GetNodes(graph, all_ort_nodes.data(), num_graph_nodes);
+  std::unordered_map<std::string, size_t> ort_node_name_to_idx;
+  for (size_t i = 0; i < num_graph_nodes; ++i) {
+    if (all_ort_nodes[i]) {
+      const char* nname = nullptr;
+      ort_api->Node_GetName(all_ort_nodes[i], &nname);
+      if (nname && nname[0] != '\0')
+        ort_node_name_to_idx.emplace(nname, i);
+    }
+  }
+
+  // For each group, collect OrtNode* pointers and register with support_info.
+  for (const auto& group : groups) {
+    std::vector<const OrtNode*> group_nodes;
+    group_nodes.reserve(group.size());
+
+    for (int proto_idx : group) {
+      const auto& proto_node = graph_proto.node(proto_idx);
+      const OrtNode* ort_node = nullptr;
+
+      // Primary: look up by name (works for named nodes).
+      if (!proto_node.name().empty()) {
+        auto it = ort_node_name_to_idx.find(proto_node.name());
+        if (it != ort_node_name_to_idx.end())
+          ort_node = all_ort_nodes[it->second];
+      }
+
+      // Fallback: use the same index — valid because OrtGraphToProto and
+      // Graph_GetNode(i) both traverse nodes in the same topological order.
+      if (!ort_node && static_cast<size_t>(proto_idx) < num_graph_nodes)
+        ort_node = all_ort_nodes[proto_idx];
+
+      if (ort_node)
+        group_nodes.push_back(ort_node);
+    }
+
+    if (group_nodes.empty()) continue;
+
+    OrtNodeFusionOptions opts{};
+    opts.ort_version_supported      = ORT_API_VERSION;
+    opts.drop_constant_initializers = false;
+
+    OrtStatus* st = ep_api->EpGraphSupportInfo_AddNodesToFuse(
+        support_info, group_nodes.data(), group_nodes.size(), &opts);
+    if (st) return st;
+  }
+
+  return nullptr;
+} catch (const std::exception& e) {
+  return ort_api->CreateStatus(ORT_EP_FAIL,
+      (std::string("NeuronEP GetCapability exception: ") + e.what()).c_str());
+}
+
+// ---------------------------------------------------------------------------
+// NeuronWrapper_Compile
+//
+// KEY CHANGE: Uses ort_graph_to_proto.h to convert the fused subgraph OrtGraph*
+// to onnx::GraphProto, then builds the Neuron model from protobuf.
+// NO reinterpret_cast to ORT internal types.
+// ---------------------------------------------------------------------------
+OrtStatus* NeuronWrapper_Compile(
+    NeuronWrapperHandle          handle,
+    const OrtApi*                ort_api,
+    const OrtEpApi*              ep_api,
+    const OrtModelEditorApi*     /*model_editor_api*/,
+    const OrtGraph* const*       graphs,
+    const OrtNode*  const*       fused_nodes,
+    size_t                       count,
+    OrtNodeComputeInfo**         node_compute_infos,
+    OrtNode**                    /*ep_context_nodes*/) try {
+
+  auto* state = static_cast<NeuronWrapperState*>(handle);
+
+  for (size_t i = 0; i < count; ++i) {
+    // Get the fused node name.
+    const char* fused_name_cstr = nullptr;
+    ort_api->Node_GetName(fused_nodes[i], &fused_name_cstr);
+    std::string fused_name = fused_name_cstr ? fused_name_cstr : "";
+
+    // Convert the fused subgraph to onnx::GraphProto.
+    onnx::GraphProto subgraph_proto;
+    {
+      OrtStatus* st = OrtEpUtils::OrtGraphToProto(*graphs[i], subgraph_proto);
+      if (st) return st;
+    }
+
+    // Build NeuronGraphContext.
+    onnxruntime::neuron::NeuronGraphContext ctx(subgraph_proto);
+
+    // Build and compile the Neuron model.
+    onnxruntime::neuron::ModelBuilder builder(
+        ctx,
+        *state->neuron_handle,
+        state->neuron_version,
+        state->neuron_target_devices,
+        state->target_device_option,
+        state->optimization_string);
+
+    builder.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
+    builder.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+
+    std::unique_ptr<onnxruntime::neuron::wrapper::Model> model;
+    NeuronStatus ns = builder.Compile(model);
+    if (!ns.IsOK()) {
+      return ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
+    }
+
+    // Build input / output maps from the fused node I/O.
+    {
+      size_t in_count = 0;
+      ort_api->Node_GetNumInputs(fused_nodes[i], &in_count);
+      std::vector<const OrtValueInfo*> inputs(in_count);
+      ort_api->Node_GetInputs(fused_nodes[i], inputs.data(), in_count);
+      std::unordered_map<std::string, size_t> input_map;
+      for (size_t j = 0; j < in_count; ++j) {
+        const char* name_cstr = nullptr;
+        ort_api->GetValueInfoName(inputs[j], &name_cstr);
+        if (name_cstr) input_map[name_cstr] = j;
+      }
+      model->SetInputMap(std::move(input_map));
+    }
+    {
+      size_t out_count = 0;
+      ort_api->Node_GetNumOutputs(fused_nodes[i], &out_count);
+      std::vector<const OrtValueInfo*> outputs(out_count);
+      ort_api->Node_GetOutputs(fused_nodes[i], outputs.data(), out_count);
+      std::unordered_map<std::string, size_t> output_map;
+      for (size_t j = 0; j < out_count; ++j) {
+        const char* name_cstr = nullptr;
+        ort_api->GetValueInfoName(outputs[j], &name_cstr);
+        if (name_cstr) output_map[name_cstr] = j;
+      }
+      model->SetOutputMap(std::move(output_map));
+    }
+
+    state->neuron_models.emplace(fused_name, std::move(model));
+
+    // Allocate OrtNodeComputeInfo.
+    auto* nci = new (std::nothrow) NeuronNodeComputeInfo(state, fused_name, ort_api);
+    if (!nci) return ort_api->CreateStatus(ORT_EP_FAIL, "NeuronEP: OOM");
+    node_compute_infos[i] = nci;
+  }
+
+  return nullptr;
+} catch (const std::exception& e) {
+  return ort_api->CreateStatus(ORT_EP_FAIL,
+      (std::string("NeuronEP Compile exception: ") + e.what()).c_str());
+}
+
+// ---------------------------------------------------------------------------
+// NeuronWrapper_ReleaseNodeComputeInfos
+// ---------------------------------------------------------------------------
+void NeuronWrapper_ReleaseNodeComputeInfos(
+    NeuronWrapperHandle  /*handle*/,
+    OrtNodeComputeInfo** node_compute_infos,
+    size_t               count) {
+  for (size_t i = 0; i < count; ++i) {
+    delete static_cast<NeuronNodeComputeInfo*>(node_compute_infos[i]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NeuronWrapper_GetPreferredLayout
+// ---------------------------------------------------------------------------
+int NeuronWrapper_GetPreferredLayout(NeuronWrapperHandle handle) {
+  auto* state = static_cast<NeuronWrapperState*>(handle);
+  bool use_nchw = (state->neuron_flags & NEURON_FLAG_USE_NCHW) != 0;
+  return use_nchw ? static_cast<int>(OrtEpDataLayout_NCHW)
+                  : static_cast<int>(OrtEpDataLayout_NHWC);
+}
+
+// ---------------------------------------------------------------------------
+// NeuronWrapper_ShouldSkipLayoutConversion
+// ---------------------------------------------------------------------------
+int NeuronWrapper_ShouldSkipLayoutConversion(
+    NeuronWrapperHandle /*handle*/,
+    const char*         /*domain*/,
+    const char*         op_type,
+    int                 /*target_layout*/) {
+  if (!op_type) return 1;
+
+  // Only spatial 4-D ops benefit from NHWC layout conversion.
+  // Every other op must keep its original layout to avoid the transpose
+  // optimizer applying a 4-D permutation [0,2,3,1] to non-4-D tensors.
+  static const std::unordered_set<std::string_view> nhwc_ops = {
+    "Conv", "ConvTranspose",
+    "AveragePool", "MaxPool", "GlobalAveragePool", "GlobalMaxPool",
+    "BatchNormalization", "InstanceNormalization",
+    "Resize", "Upsample",
+    "DepthToSpace", "SpaceToDepth",
+    "LRN",
+  };
+  return nhwc_ops.count(op_type) ? 0 : 1;
+}
+
+}  // extern "C"
