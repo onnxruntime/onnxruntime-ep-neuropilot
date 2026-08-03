@@ -21,7 +21,12 @@ class NeuronEp;
 // ---------------------------------------------------------------------------
 class NeuronEpFactory : public OrtEpFactory, public ApiPtrs {
  public:
-  NeuronEpFactory(const char* ep_name, ApiPtrs apis, const OrtLogger& default_logger);
+  // canonical EP name; independent of the name used to register the library
+  static constexpr const char* kEpName = "NeuroPilotExecutionProvider";
+
+  // ort_api_version is the negotiated ORT API version (see CreateEpFactories);
+  // it may be lower than the ORT_API_VERSION this library was compiled against.
+  NeuronEpFactory(ApiPtrs apis, const OrtLogger& default_logger, uint32_t ort_api_version);
   ~NeuronEpFactory();
 
   // Accessors used by NeuronEp / stream support.
@@ -77,7 +82,7 @@ class NeuronEpFactory : public OrtEpFactory, public ApiPtrs {
       OrtDeviceEpIncompatibilityDetails* details) noexcept;
 
   // ---- Factory state -------------------------------------------------------
-  const std::string ep_name_;
+  const std::string ep_name_{kEpName};
 
   // MediaTek Neuron EP identity.
   // Vendor ID 0x0E8D is MediaTek's PCI vendor ID.

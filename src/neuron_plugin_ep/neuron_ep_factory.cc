@@ -12,15 +12,14 @@
 // ===========================================================================
 // Constructor / Destructor
 // ===========================================================================
-NeuronEpFactory::NeuronEpFactory(const char* ep_name, ApiPtrs apis,
-                                 const OrtLogger& default_logger)
+NeuronEpFactory::NeuronEpFactory(ApiPtrs apis, const OrtLogger& default_logger,
+                                 uint32_t ort_api_version)
     : OrtEpFactory{},
       ApiPtrs(apis),
       default_logger_{default_logger},
-      ep_name_{ep_name},
       default_memory_info_{nullptr},
       readonly_memory_info_{nullptr} {
-  ort_version_supported = ORT_API_VERSION;
+  ort_version_supported = ort_api_version;
 
   // Populate the C vtable.
   GetName                                 = GetNameImpl;
@@ -35,7 +34,10 @@ NeuronEpFactory::NeuronEpFactory(const char* ep_name, ApiPtrs apis,
   CreateDataTransfer                      = CreateDataTransferImpl;
   IsStreamAware                           = IsStreamAwareImpl;
   CreateSyncStreamForDevice               = CreateSyncStreamForDeviceImpl;
-  GetHardwareDeviceIncompatibilityDetails = GetHardwareDeviceIncompatibilityDetailsImpl;
+
+  if (ort_api_version >= 24) {
+    GetHardwareDeviceIncompatibilityDetails = GetHardwareDeviceIncompatibilityDetailsImpl;
+  }
 
   // Neuron EP uses CPU-accessible memory.
   // The MediaTek NPU reads/writes via the same CPU address space; no separate
@@ -149,8 +151,8 @@ OrtStatus* ORT_API_CALL NeuronEpFactory::GetSupportedDevicesImpl(
 //
 // ORT stores ep device options in session_options.config_options as:
 //   "ep.{lowercase(ep_name)}.{OPTION_KEY}"
-// For example, for EP name "NeuronEP":
-//   "ep.neuronep.NEURON_FLAG_USE_FP16" = "1"
+// For example, for EP name "NeuroPilotExecutionProvider":
+//   "ep.neuropilotexecutionprovider.NEURON_FLAG_USE_FP16" = "1"
 // Both the defaults set in GetSupportedDevices (ep_options) and any user
 // overrides from add_provider_for_devices({}, {"NEURON_FLAG_USE_FP16":"1"})
 // end up in session config via AddEpOptionsToSessionOptions.

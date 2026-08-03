@@ -2,17 +2,17 @@
 
 STATUS: Work-in-progress. Not yet wired into the Yocto recipe or pip packaging.
 
-This follows the ONNX Runtime plugin EP packaging pattern (same as telum/tensorrt EPs):
+This follows the ONNX Runtime plugin EP packaging pattern:
   - get_ep_name()       — canonical EP name string for ORT APIs
   - get_ep_names()      — list of EP names exposed by this plugin
-  - get_library_path()  — absolute path to libonnxruntime_providers_neuron.so
+  - get_library_path()  — absolute path to libonnxruntime_providers_neuropilot.so
 
 Usage from Python:
     import onnxruntime as ort
     import onnxruntime_ep_neuron as neuron_ep
 
     ort.register_execution_provider_library(
-        "NeuronEP", neuron_ep.get_library_path()
+        neuron_ep.get_ep_name(), neuron_ep.get_library_path()
     )
     devices = [d for d in ort.get_ep_devices()
                if d.ep_name == neuron_ep.get_ep_name()]
@@ -21,7 +21,7 @@ Usage from Python:
     opts.add_provider_for_devices(devices, {})
     sess = ort.InferenceSession("model.onnx", sess_options=opts)
 
-    ort.unregister_execution_provider_library("NeuronEP")
+    ort.unregister_execution_provider_library(neuron_ep.get_ep_name())
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from typing import List
 # ---------------------------------------------------------------------------
 # EP identity — must match NeuronEpFactory::GetNameImpl() in neuron_ep_factory.cc
 # ---------------------------------------------------------------------------
-_EP_NAME = "NeuronPluginExecutionProvider"
+_EP_NAME = "NeuroPilotExecutionProvider"
 
 # Library base name (without lib prefix or platform suffix).
 _LIB_BASE = "onnxruntime_providers_neuropilot"
