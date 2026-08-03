@@ -58,6 +58,9 @@ class ModelBuilder {
                neuron::wrapper::TargetDeviceOption target_device_option,
                const std::string& neuron_optimization_string);
 
+  // asks the target devices whether they can run every operation in the model
+  NeuronStatus ValidateDeviceSupport();
+
   NeuronStatus Compile(std::unique_ptr<neuron::wrapper::Model>& model);
   NeuronStatus RestoredFromAdapterFormattedDla(std::unique_ptr<neuron::wrapper::Model>& model);
 
@@ -198,6 +201,9 @@ class ModelBuilder {
   const neuron::wrapper::TargetDeviceOption target_device_option_;
   size_t num_neuron_ops_ = 0;
   uint32_t next_index_ = 0;
+
+  // false when no target devices were resolved, so Compile() stays device-agnostic
+  bool device_support_validated_ = false;
 
   std::string neuron_optimization_string_;
 

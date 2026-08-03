@@ -70,6 +70,9 @@ struct NeuronWrapperState {
   std::string optimization_string;
   std::unordered_set<std::string> force_skip_ops;
 
+  // NEURON_FLAG_SKIP_CAPABILITY_PROBE; trades CPU fallback for partitioning speed
+  bool skip_capability_probe{false};
+
   // Neuron SDK handle.
   const NeuronApi* neuron_handle{nullptr};
   NeuronRuntimeVersion neuron_version{1, 0, 0};
@@ -688,6 +691,167 @@ static std::vector<std::vector<int>> FindSupportedGroups(
   return groups;
 }
 
+// ---------------------------------------------------------------------------
+// ExtractSubgraphProto
+// ---------------------------------------------------------------------------
+static void ExtractSubgraphProto(const onnx::GraphProto& parent,
+                                 const std::vector<int>& node_indices,
+                                 const onnxruntime::neuron::NeuronGraphContext& parent_ctx,
+                                 onnx::GraphProto& out) {
+  out.set_name("neuron_capability_probe");
+
+  std::unordered_set<int> in_group(node_indices.begin(), node_indices.end());
+
+  // Tensors produced inside the group.
+  std::unordered_set<std::string> produced;
+  for (int idx : node_indices)
+    for (const auto& o : parent.node(idx).output())
+      if (!o.empty()) produced.insert(o);
+
+  // Tensors consumed outside the group (or that are graph outputs) must be
+  // exposed as subgraph outputs.
+  std::unordered_set<std::string> consumed_outside;
+  for (int i = 0; i < parent.node_size(); ++i) {
+    if (in_group.count(i)) continue;
+    for (const auto& inp : parent.node(i).input())
+      if (!inp.empty() && produced.count(inp)) consumed_outside.insert(inp);
+  }
+  for (const auto& go : parent.output())
+    if (produced.count(go.name())) consumed_outside.insert(go.name());
+
+  auto add_value_info = [&](const std::string& name, onnx::ValueInfoProto* dst) {
+    const auto* vi = parent_ctx.GetValueInfo(name);
+    if (vi) {
+      *dst = *vi;
+    } else {
+      dst->set_name(name);
+    }
+    dst->set_name(name);
+  };
+
+  // Nodes, in the parent's topological order.
+  std::vector<int> ordered(node_indices);
+  std::sort(ordered.begin(), ordered.end());
+
+  std::unordered_set<std::string> added_inputs;
+  std::unordered_set<std::string> added_inits;
+
+  for (int idx : ordered) {
+    const auto& node = parent.node(idx);
+    *out.add_node() = node;
+
+    for (const auto& inp : node.input()) {
+      if (inp.empty() || produced.count(inp)) continue;
+
+      if (parent_ctx.IsInitializer(inp)) {
+        if (added_inits.insert(inp).second) {
+          const auto* init = parent_ctx.GetInitializer(inp);
+          if (init) *out.add_initializer() = *init;
+        }
+        continue;
+      }
+
+      if (added_inputs.insert(inp).second)
+        add_value_info(inp, out.add_input());
+    }
+  }
+
+  for (const auto& name : produced) {
+    if (consumed_outside.count(name))
+      add_value_info(name, out.add_output());
+    else
+      add_value_info(name, out.add_value_info());
+  }
+
+  // keep the last node's outputs so the model is still well-formed
+  if (out.output_size() == 0 && !ordered.empty()) {
+    for (const auto& o : parent.node(ordered.back()).output())
+      if (!o.empty()) add_value_info(o, out.add_output());
+  }
+}
+
+constexpr const char* kMSInternalNHWCDomain = "com.ms.internal.nhwc";
+
+// ops ORT permutes during layout transformation, which runs after GetCapability
+static const std::unordered_set<std::string>& LayoutSensitiveOps() {
+  static const std::unordered_set<std::string> kOps = {
+      "Conv", "ConvTranspose", "QLinearConv",
+      "AveragePool", "MaxPool", "LpPool", "MaxRoiPool",
+      "GlobalAveragePool", "GlobalMaxPool", "GlobalLpPool", "QLinearAveragePool",
+      "BatchNormalization", "InstanceNormalization", "LRN",
+      "Resize", "Upsample", "DepthToSpace", "SpaceToDepth", "GridSample",
+  };
+  return kOps;
+}
+
+// ---------------------------------------------------------------------------
+// FilterGroupsByDeviceSupport
+// ---------------------------------------------------------------------------
+static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
+    const onnx::GraphProto&                        graph_proto,
+    const onnxruntime::neuron::NeuronGraphContext& ctx,
+    std::vector<std::vector<int>>                  groups,
+    const NeuronWrapperState*                      state) {
+
+  if (state->skip_capability_probe || groups.empty()) return groups;
+
+  std::vector<std::vector<int>> kept;
+  kept.reserve(groups.size());
+
+  for (auto& group : groups) {
+    const auto& layout_sensitive = LayoutSensitiveOps();
+    bool probe_would_be_stale = false;
+    for (int idx : group) {
+      const auto& n = graph_proto.node(idx);
+      // before layout transformation this is not the graph Compile() gets;
+      // after it, ORT converted the node at our request and we must not decline
+      if (layout_sensitive.count(n.op_type()) || n.domain() == kMSInternalNHWCDomain) {
+        probe_would_be_stale = true;
+        break;
+      }
+    }
+    if (probe_would_be_stale) {
+      kept.push_back(std::move(group));
+      continue;
+    }
+
+    onnx::GraphProto sub;
+    ExtractSubgraphProto(graph_proto, group, ctx, sub);
+
+    bool ok = false;
+    std::string reason;
+    try {
+      onnxruntime::neuron::NeuronGraphContext sub_ctx(sub);
+      onnxruntime::neuron::ModelBuilder probe(
+          sub_ctx,
+          *state->neuron_handle,
+          state->neuron_version,
+          state->neuron_target_devices,
+          state->target_device_option,
+          state->optimization_string);
+      probe.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
+      probe.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+
+      NeuronStatus ns = probe.ValidateDeviceSupport();
+      ok = ns.IsOK();
+      if (!ok) reason = ns.ErrorMessage();
+    } catch (const std::exception& e) {
+      ok = false;
+      reason = std::string("exception: ") + e.what();
+    }
+
+    if (ok) {
+      kept.push_back(std::move(group));
+    } else {
+      LOGS_NEURON(INFO) << "Declining partition of " << group.size()
+                        << " node(s); the Neuron compiler cannot build it ("
+                        << reason << "). These nodes will run on CPU.";
+    }
+  }
+
+  return kept;
+}
+
 }  // anonymous namespace
 
 // ============================================================================
@@ -721,6 +885,8 @@ NeuronWrapperHandle NeuronWrapper_Create(
 
   auto min_gs = get("NEURON_FLAG_MIN_GROUP_SIZE");
   if (!min_gs.empty()) s->min_group_size = static_cast<uint32_t>(std::stoi(min_gs));
+
+  s->skip_capability_probe = (get("NEURON_FLAG_SKIP_CAPABILITY_PROBE") == "1");
 
   s->optimization_string = get("NEURON_FLAG_OPTIMIZATION_STRING");
 
@@ -766,9 +932,6 @@ void NeuronWrapper_Destroy(NeuronWrapperHandle handle) {
 
 // ---------------------------------------------------------------------------
 // NeuronWrapper_GetCapability
-//
-// KEY CHANGE: Uses ort_graph_to_proto.h to convert OrtGraph* → onnx::GraphProto.
-// NO reinterpret_cast to ORT internal types.
 // ---------------------------------------------------------------------------
 OrtStatus* NeuronWrapper_GetCapability(
     NeuronWrapperHandle    handle,
@@ -786,13 +949,17 @@ OrtStatus* NeuronWrapper_GetCapability(
     if (!st.IsOK()) return st.release();
   }
 
-  // Find supported node groups.
-  const auto groups = FindSupportedGroups(graph_proto, state);
+  // Find supported node groups from the static op-capability checks, then
+  // confirm each one against the hardware before claiming it.
+  onnxruntime::neuron::NeuronGraphContext ctx(graph_proto);
+  const auto proposed = FindSupportedGroups(graph_proto, state);
+  const auto groups   = FilterGroupsByDeviceSupport(graph_proto, ctx, proposed, state);
 
   {
     size_t supported_nodes = 0;
     for (const auto& g : groups) supported_nodes += g.size();
     LOGS_NEURON(INFO) << "NeuronEP GetCapability: partitions=" << groups.size()
+                      << " (proposed=" << proposed.size() << ")"
                       << " supported_nodes=" << supported_nodes
                       << " total_nodes=" << graph_proto.node_size();
   }

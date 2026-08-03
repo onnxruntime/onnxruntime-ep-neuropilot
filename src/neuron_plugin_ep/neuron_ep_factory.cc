@@ -129,6 +129,7 @@ OrtStatus* ORT_API_CALL NeuronEpFactory::GetSupportedDevicesImpl(
     f.ort_api.AddKeyValuePair(ep_options, "NEURON_FLAG_CPU_DISABLED", "0");
     f.ort_api.AddKeyValuePair(ep_options, "NEURON_FLAG_CPU_ONLY",  "0");
     f.ort_api.AddKeyValuePair(ep_options, "NEURON_FLAG_MDLA_ONLY", "0");
+    f.ort_api.AddKeyValuePair(ep_options, "NEURON_FLAG_SKIP_CAPABILITY_PROBE", "0");
 
     OrtEpDevice* ep_device = nullptr;
     OrtStatus* st = f.ep_api.CreateEpDevice(&f, devices[i], ep_metadata, ep_options, &ep_device);
@@ -199,6 +200,7 @@ OrtStatus* ORT_API_CALL NeuronEpFactory::CreateEpImpl(
         "NEURON_FLAG_MIN_GROUP_SIZE",
         "NEURON_FLAG_OPTIMIZATION_STRING",
         "NEURON_FLAG_FORCE_SKIP_OPS_STRING",
+        "NEURON_FLAG_SKIP_CAPABILITY_PROBE",
     };
     std::string config_val;
     for (const char* flag : kNeuronFlags) {

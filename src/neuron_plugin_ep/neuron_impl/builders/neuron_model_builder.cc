@@ -1104,9 +1104,9 @@ NeuronStatus ModelBuilder::AddDlaOperation(const onnx::NodeProto& node,
 }
 
 // ---------------------------------------------------------------------------
-// Compile
+// ValidateDeviceSupport
 // ---------------------------------------------------------------------------
-NeuronStatus ModelBuilder::Compile(std::unique_ptr<wrapper::Model>& model) {
+NeuronStatus ModelBuilder::ValidateDeviceSupport() {
   NEURON_RETURN_IF_ERROR(ComposeNeuronModel());
 
   LOGS_NEURON(VERBOSE) << "Identifying inputs: " << Shape2String(input_index_vec_)
@@ -1130,35 +1130,51 @@ NeuronStatus ModelBuilder::Compile(std::unique_ptr<wrapper::Model>& model) {
       neuron_.NeuronModel_finish(neuron_model_->model_),
       "NeuronModel_finish");
 
+  if (neuron_target_devices_.empty()) return NeuronStatus::OK();
+
   std::vector<NeuronDevice*> device_handles;
   for (const auto& dev : neuron_target_devices_) {
     LOGS_NEURON(VERBOSE) << "Using device: " << dev.name;
     device_handles.push_back(dev.device);
   }
 
-  bool use_create_for_devices = false;
   std::unique_ptr<bool[]> supported_ops_holder =
       std::make_unique<bool[]>(num_neuron_ops_);
-  if (!neuron_target_devices_.empty()) {
-    NEURON_RETURN_STATUS_ON_ERROR_WITH_NOTE(
-        neuron_.NeuronModel_getSupportedOperationsForDevices(
-            neuron_model_->model_, device_handles.data(),
-            static_cast<uint32_t>(device_handles.size()),
-            supported_ops_holder.get()),
-        "getSupportedOperationsForDevices");
-    bool all_ok = std::all_of(supported_ops_holder.get(),
-                              supported_ops_holder.get() + num_neuron_ops_,
-                              [](bool s) { return s; });
-    if (!all_ok) {
-      LOGS_NEURON(ERROR) << "Some ops not supported by target devices: "
+  NEURON_RETURN_STATUS_ON_ERROR_WITH_NOTE(
+      neuron_.NeuronModel_getSupportedOperationsForDevices(
+          neuron_model_->model_, device_handles.data(),
+          static_cast<uint32_t>(device_handles.size()),
+          supported_ops_holder.get()),
+      "getSupportedOperationsForDevices");
+
+  bool all_ok = std::all_of(supported_ops_holder.get(),
+                            supported_ops_holder.get() + num_neuron_ops_,
+                            [](bool s) { return s; });
+  if (!all_ok) {
+    LOGS_NEURON(VERBOSE) << "Some ops not supported by target devices: "
                          << GetDevicesDescription(neuron_target_devices_);
-      return NeuronStatus{false, MakeNeuronString(
-          "Some ops unsupported by devices: ",
-          GetDevicesDescription(neuron_target_devices_))};
-    }
-    if (target_device_option_ != wrapper::TargetDeviceOption::ALL_DEVICES)
-      use_create_for_devices = true;
+    return NeuronStatus{false, MakeNeuronString(
+        "Some ops unsupported by devices: ",
+        GetDevicesDescription(neuron_target_devices_))};
   }
+
+  device_support_validated_ = true;
+  return NeuronStatus::OK();
+}
+
+// ---------------------------------------------------------------------------
+// Compile
+// ---------------------------------------------------------------------------
+NeuronStatus ModelBuilder::Compile(std::unique_ptr<wrapper::Model>& model) {
+  NEURON_RETURN_IF_ERROR(ValidateDeviceSupport());
+
+  std::vector<NeuronDevice*> device_handles;
+  for (const auto& dev : neuron_target_devices_)
+    device_handles.push_back(dev.device);
+
+  const bool use_create_for_devices =
+      device_support_validated_ &&
+      target_device_option_ != wrapper::TargetDeviceOption::ALL_DEVICES;
 
   if (use_create_for_devices) {
     NEURON_RETURN_STATUS_ON_ERROR_WITH_NOTE(
