@@ -99,12 +99,16 @@ bool MatMulOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
                                                const NeuronGraphContext& ctx,
                                                const OpSupportCheckParams& params) const {
   // For QLinearMatMul, the first tensor input is at index 0.
-  if (!IsTypeSupported(node, ctx, 0, /*is_input*/ true,
-                       {onnx::TensorProto::FLOAT,
-                        onnx::TensorProto::UINT8,
-                        onnx::TensorProto::INT8,
-                        onnx::TensorProto::INT16,
-                        onnx::TensorProto::UINT16})) {
+  std::unordered_set<int32_t> supported_types{onnx::TensorProto::UINT8,
+                                              onnx::TensorProto::INT8,
+                                              onnx::TensorProto::INT16,
+                                              onnx::TensorProto::UINT16};
+
+  if (params.use_fp16 || IsQuantizedOp(node, ctx)) {
+    supported_types.insert(onnx::TensorProto::FLOAT);
+  }
+
+  if (!IsTypeSupported(node, ctx, 0, /*is_input*/ true, supported_types)) {
     return false;
   }
 

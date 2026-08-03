@@ -318,7 +318,9 @@ bool GemmOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
                                              const NeuronGraphContext& ctx,
                                              const OpSupportCheckParams& params) const {
   if (!IsQuantizedOp(node, ctx)) {
-    return BaseOpBuilder::HasSupportedInputsImpl(node, ctx, params);
+    std::unordered_set<int32_t> supported_types{onnx::TensorProto::FLOAT16};
+    if (params.use_fp16) supported_types.insert(onnx::TensorProto::FLOAT);
+    return IsTypeSupported(node, ctx, 0, /*is_input*/ true, supported_types);
   }
 
   // QDQGemm: check quantized IO types.

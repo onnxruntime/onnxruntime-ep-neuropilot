@@ -21,6 +21,9 @@ struct OpSupportCheckParams {
       .patch = 0};
   neuron::wrapper::DeviceVector devices;
   bool use_nchw = false;
+
+  // NEURON_FLAG_USE_FP16; the matrix ops only accept float32 when it is set
+  bool use_fp16 = false;
 };
 
 class IOpBuilder {

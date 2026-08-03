@@ -50,6 +50,11 @@ class ConvOpBuilder : public BaseOpBuilder {
                                const NeuronGraphContext& ctx,
                                const OpSupportCheckParams& params) const override;
 
+  bool IsQuantizedOp(const onnx::NodeProto& node,
+                     const NeuronGraphContext& ctx) const override {
+    return IsQuantizedConv(GetQuantizedOpType(node, ctx));
+  }
+
   bool IsComputeHeavy(const onnx::NodeProto& /*node*/) const override { return true; }
 };
 
@@ -381,12 +386,17 @@ bool ConvOpBuilder::HasSupportedInputsImpl(
     const onnx::NodeProto& node,
     const NeuronGraphContext& ctx,
     const OpSupportCheckParams& params) const {
-  // Check input[0] (the tensor input) supports float or quantized types.
-  return IsTypeSupported(node, ctx, 0, /*is_input*/ true,
-                         {onnx::TensorProto::FLOAT,
-                          onnx::TensorProto::FLOAT16,
-                          onnx::TensorProto::INT8,
-                          onnx::TensorProto::UINT8});
+  std::unordered_set<int32_t> supported_types{onnx::TensorProto::FLOAT16,
+                                              onnx::TensorProto::INT8,
+                                              onnx::TensorProto::UINT8};
+
+  // the matrix units only take float32 with the fp32->fp16 relaxation; a QDQ
+  // group's core node reports float32 here but executes quantized
+  if (params.use_fp16 || IsQuantizedOp(node, ctx)) {
+    supported_types.insert(onnx::TensorProto::FLOAT);
+  }
+
+  return IsTypeSupported(node, ctx, 0, /*is_input*/ true, supported_types);
 }
 
 void CreateConvOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations) {

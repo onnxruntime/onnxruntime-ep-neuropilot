@@ -374,6 +374,7 @@ static std::vector<std::vector<int>> FindSupportedGroups(
   check_params.version  = state->neuron_version;
   check_params.devices  = state->neuron_target_devices;
   check_params.use_nchw = (state->neuron_flags & NEURON_FLAG_USE_NCHW) != 0;
+  check_params.use_fp16 = (state->neuron_flags & NEURON_FLAG_USE_FP16) != 0;
 
   // ──────────────────────────────────────────────────────────────────────
   // Phase A: per-node support determination (independent of grouping).
