@@ -48,7 +48,7 @@ class ExpandOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 
@@ -190,9 +190,9 @@ NeuronStatus ExpandOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
 }
 
 // ---------------------------------------------------------------------------
-// HasSupportedInputOutputsImpl
+// HasSupportedInputsImpl
 // ---------------------------------------------------------------------------
-bool ExpandOpBuilder::HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+bool ExpandOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
                                                      const NeuronGraphContext& ctx,
                                                      const OpSupportCheckParams& /*params*/) const {
   // data (input 0): float32, float16, or quantized uint8/int8

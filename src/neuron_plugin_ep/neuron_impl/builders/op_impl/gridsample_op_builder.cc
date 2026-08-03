@@ -107,7 +107,7 @@ class GridSampleOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 
@@ -176,9 +176,9 @@ NeuronStatus GridSampleOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_buil
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------// ---------------------------------------------------------------------------
-// HasSupportedInputOutputsImpl
+// HasSupportedInputsImpl
 // ---------------------------------------------------------------------------
-bool GridSampleOpBuilder::HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+bool GridSampleOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
                                                          const NeuronGraphContext& ctx,
                                                          const OpSupportCheckParams& /*params*/) const {
   // X (input 0): float32 or float16

@@ -44,7 +44,10 @@ class BaseOpBuilder : public IOpBuilder {
 
   bool IsOpSupported(const onnx::NodeProto& node,
                      const NeuronGraphContext& ctx,
-                     const neuron::OpSupportCheckParams& params) const override;
+                     const neuron::OpSupportCheckParams& params) const override final;
+
+  // is this op worth a dedicated NPU dispatch
+  virtual bool IsComputeHeavy(const onnx::NodeProto& /*node*/) const { return false; }
 
  protected:
   // Subclasses implement the actual model-building here.
@@ -61,7 +64,12 @@ class BaseOpBuilder : public IOpBuilder {
     return {4, 1, 0};
   }
 
-  virtual bool HasSupportedInputOutputsImpl(
+  virtual bool HasSupportedInputsImpl(
+      const onnx::NodeProto& node,
+      const NeuronGraphContext& ctx,
+      const neuron::OpSupportCheckParams& params) const;
+
+  virtual bool HasSupportedOutputsImpl(
       const onnx::NodeProto& node,
       const NeuronGraphContext& ctx,
       const neuron::OpSupportCheckParams& params) const;
@@ -89,9 +97,12 @@ class BaseOpBuilder : public IOpBuilder {
 
  private:
   bool HasSupportedOpSet(const onnx::NodeProto& node) const;
-  bool HasSupportedInputOutputs(const onnx::NodeProto& node,
-                                 const NeuronGraphContext& ctx,
-                                 const neuron::OpSupportCheckParams& params) const;
+  bool HasSupportedInputs(const onnx::NodeProto& node,
+                          const NeuronGraphContext& ctx,
+                          const neuron::OpSupportCheckParams& params) const;
+  bool HasSupportedOutputs(const onnx::NodeProto& node,
+                           const NeuronGraphContext& ctx,
+                           const neuron::OpSupportCheckParams& params) const;
 };
 
 }  // namespace neuron

@@ -46,9 +46,11 @@ class ConvOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
-                                     const NeuronGraphContext& ctx,
-                                     const OpSupportCheckParams& params) const override;
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
+                               const NeuronGraphContext& ctx,
+                               const OpSupportCheckParams& params) const override;
+
+  bool IsComputeHeavy(const onnx::NodeProto& /*node*/) const override { return true; }
 };
 
 // Add operator related
@@ -375,7 +377,7 @@ NeuronStatus ConvOpBuilder::AddToModelBuilderImpl(
 }
 
 // Operator support related
-bool ConvOpBuilder::HasSupportedInputOutputsImpl(
+bool ConvOpBuilder::HasSupportedInputsImpl(
     const onnx::NodeProto& node,
     const NeuronGraphContext& ctx,
     const OpSupportCheckParams& params) const {

@@ -41,7 +41,7 @@ class QuantizeLinearOpBuilder : public BaseOpBuilder {
                                       const onnx::NodeProto& node,
                                       const NeuronGraphContext& ctx) const override;
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 };
@@ -61,9 +61,9 @@ void QuantizeLinearOpBuilder::AddInitializersToSkip(ModelBuilder& model_builder,
 }
 
 // ---------------------------------------------------------------------------
-// HasSupportedInputOutputsImpl
+// HasSupportedInputsImpl
 // ---------------------------------------------------------------------------
-bool QuantizeLinearOpBuilder::HasSupportedInputOutputsImpl(
+bool QuantizeLinearOpBuilder::HasSupportedInputsImpl(
     const onnx::NodeProto& node,
     const NeuronGraphContext& ctx,
     const OpSupportCheckParams& /*params*/) const {

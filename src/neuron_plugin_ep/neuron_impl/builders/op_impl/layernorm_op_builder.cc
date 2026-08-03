@@ -34,7 +34,7 @@ class LayerNormalizationOpBuilder : public BaseOpBuilder {
                                       const onnx::NodeProto& node,
                                       const NeuronGraphContext& ctx) const override;
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 
@@ -50,7 +50,7 @@ void LayerNormalizationOpBuilder::AddInitializersToSkip(
   model_builder.AddInitializerToSkip(node.input(2));  // beta
 }
 
-bool LayerNormalizationOpBuilder::HasSupportedInputOutputsImpl(
+bool LayerNormalizationOpBuilder::HasSupportedInputsImpl(
     const onnx::NodeProto& node,
     const NeuronGraphContext& ctx,
     const OpSupportCheckParams& params) const {

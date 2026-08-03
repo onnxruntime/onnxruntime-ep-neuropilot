@@ -42,6 +42,9 @@ class IOpBuilder {
   virtual bool IsOpSupported(const onnx::NodeProto& node,
                               const NeuronGraphContext& ctx,
                               const OpSupportCheckParams& params) const = 0;
+
+  // is this op worth a dedicated NPU dispatch
+  virtual bool IsComputeHeavy(const onnx::NodeProto& node) const = 0;
 };
 
 }  // namespace neuron

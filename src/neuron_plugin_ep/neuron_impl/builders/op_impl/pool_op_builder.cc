@@ -28,7 +28,7 @@ class PoolOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 };
@@ -153,7 +153,7 @@ NeuronStatus PoolOpBuilder::AddToModelBuilderImpl(
 }
 
 // Operator support related
-bool PoolOpBuilder::HasSupportedInputOutputsImpl(
+bool PoolOpBuilder::HasSupportedInputsImpl(
     const onnx::NodeProto& node,
     const NeuronGraphContext& ctx,
     const OpSupportCheckParams& params) const {
@@ -161,7 +161,7 @@ bool PoolOpBuilder::HasSupportedInputOutputsImpl(
   bool is_max_pool = (op_type == "MaxPool");
 
   if (!is_max_pool) {
-    return BaseOpBuilder::HasSupportedInputOutputsImpl(node, ctx, params);
+    return BaseOpBuilder::HasSupportedInputsImpl(node, ctx, params);
   }
 
   // MaxPool supports float and uint8 input

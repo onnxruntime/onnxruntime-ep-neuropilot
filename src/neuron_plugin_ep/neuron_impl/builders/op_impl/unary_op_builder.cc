@@ -26,7 +26,7 @@ class UnaryOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 
@@ -121,12 +121,12 @@ NeuronStatus UnaryOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
                                                      {output}, {output_operand_type}));
   return NeuronStatus::OK();
 }
-bool UnaryOpBuilder::HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+bool UnaryOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
                                                    const NeuronGraphContext& ctx,
                                                    const OpSupportCheckParams& params) const {
   // For QLinearSigmoid, verify quantized I/O types
   if (node.op_type() != "QLinearSigmoid")
-    return BaseOpBuilder::HasSupportedInputOutputsImpl(node, ctx, params);
+    return BaseOpBuilder::HasSupportedInputsImpl(node, ctx, params);
 
   if (!IsQuantizedIOSupported(ctx, node, {0}, params, /*is_input*/ true))
     return false;

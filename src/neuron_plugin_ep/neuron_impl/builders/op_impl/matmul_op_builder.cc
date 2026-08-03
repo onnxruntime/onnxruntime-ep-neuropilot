@@ -46,7 +46,7 @@ class MatMulOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 
@@ -57,6 +57,7 @@ class MatMulOpBuilder : public BaseOpBuilder {
     return IsQuantizedMatMul(GetQuantizedOpType(node, ctx));
   }
 
+  bool IsComputeHeavy(const onnx::NodeProto& /*node*/) const override { return true; }
 };
 
 
@@ -92,11 +93,11 @@ void MatMulOpBuilder::AddInitializersToSkip(ModelBuilder& model_builder,
 }
 
 // ---------------------------------------------------------------------------
-// HasSupportedInputOutputsImpl
+// HasSupportedInputsImpl
 // ---------------------------------------------------------------------------
-bool MatMulOpBuilder::HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
-                                                     const NeuronGraphContext& ctx,
-                                                     const OpSupportCheckParams& params) const {
+bool MatMulOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
+                                               const NeuronGraphContext& ctx,
+                                               const OpSupportCheckParams& params) const {
   // For QLinearMatMul, the first tensor input is at index 0.
   if (!IsTypeSupported(node, ctx, 0, /*is_input*/ true,
                        {onnx::TensorProto::FLOAT,

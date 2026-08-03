@@ -34,7 +34,7 @@ class ReshapeOpBuilder : public BaseOpBuilder {
 
   int GetMinSupportedOpSet(const onnx::NodeProto& /*node*/) const override { return 5; }
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& /*params*/) const override {
     return IsTypeSupported(node, ctx, 0, /*is_input*/ true,

@@ -53,7 +53,7 @@ class SkipSimplifiedLayerNormOpBuilder : public BaseOpBuilder {
                                      const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                     const NeuronGraphContext& ctx,
                                     const OpSupportCheckParams& params) const override;
 
@@ -72,7 +72,7 @@ void SkipSimplifiedLayerNormOpBuilder::AddInitializersToSkip(
     model_builder.AddInitializerToSkip(node.input(static_cast<int>(gamma_idx)));
 }
 
-bool SkipSimplifiedLayerNormOpBuilder::HasSupportedInputOutputsImpl(
+bool SkipSimplifiedLayerNormOpBuilder::HasSupportedInputsImpl(
     const onnx::NodeProto& node,
     const NeuronGraphContext& ctx,
     const OpSupportCheckParams& /*params*/) const {

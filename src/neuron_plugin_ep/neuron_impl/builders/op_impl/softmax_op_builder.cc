@@ -33,9 +33,6 @@ class SoftMaxOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
-                                     const NeuronGraphContext& ctx,
-                                     const OpSupportCheckParams& params) const override;
 };
 
 NeuronStatus SoftMaxOpBuilder::AddToModelBuilderImpl(
@@ -79,14 +76,6 @@ NeuronStatus SoftMaxOpBuilder::AddToModelBuilderImpl(
   NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_SOFTMAX, input_indices,
                                                     {output}, {output_operand_type}));
   return NeuronStatus::OK();
-}
-
-// Operator support related
-bool SoftMaxOpBuilder::HasSupportedInputOutputsImpl(
-    const onnx::NodeProto& node,
-    const NeuronGraphContext& ctx,
-    const OpSupportCheckParams& params) const {
-  return BaseOpBuilder::HasSupportedInputOutputsImpl(node, ctx, params);
 }
 
 void CreateSoftMaxOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations) {

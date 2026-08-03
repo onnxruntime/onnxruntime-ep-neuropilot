@@ -636,16 +636,12 @@ static std::vector<std::vector<int>> FindSupportedGroups(
   // decode — cost more in Neuron dispatch + NPU<->CPU tensor round-trips than
   // they save, so they run faster left on CPU.  Dropping them here keeps the
   // conv backbone on the NPU while the decode stays on CPU as one region.
-  static const std::unordered_set<std::string> kHeavyOps = {
-      "Conv", "QLinearConv", "ConvTranspose", "ConvInteger",
-      "Gemm", "MatMul", "QLinearMatMul", "MatMulInteger", "MatMulNBits",
-      "FusedMatMul", "FusedConv",
-      "LSTM", "GRU", "RNN",
-      "Attention", "MultiHeadAttention", "GroupQueryAttention",
-  };
   auto partition_has_heavy_op = [&](const std::vector<int>& nodes) -> bool {
-    for (int idx : nodes)
-      if (kHeavyOps.count(graph_proto.node(idx).op_type())) return true;
+    for (int idx : nodes) {
+      const auto& n = graph_proto.node(idx);
+      const auto it = op_builders.find(n.op_type());
+      if (it != op_builders.end() && it->second->IsComputeHeavy(n)) return true;
+    }
     return false;
   };
 

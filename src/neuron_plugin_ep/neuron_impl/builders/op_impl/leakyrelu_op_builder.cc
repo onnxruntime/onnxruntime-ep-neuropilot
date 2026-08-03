@@ -16,7 +16,7 @@ class LeakyReluOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& /*node*/,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& /*node*/,
                                      const NeuronGraphContext& /*ctx*/,
                                      const OpSupportCheckParams& /*params*/) const override {
     return true;

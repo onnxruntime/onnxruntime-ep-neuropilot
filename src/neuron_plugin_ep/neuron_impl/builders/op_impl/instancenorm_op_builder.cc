@@ -31,7 +31,7 @@ class InstanceNormalizationOpBuilder : public BaseOpBuilder {
                                       const onnx::NodeProto& node,
                                       const NeuronGraphContext& ctx) const override;
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 
@@ -46,7 +46,7 @@ void InstanceNormalizationOpBuilder::AddInitializersToSkip(
   model_builder.AddInitializerToSkip(node.input(2));  // B (bias)
 }
 
-bool InstanceNormalizationOpBuilder::HasSupportedInputOutputsImpl(
+bool InstanceNormalizationOpBuilder::HasSupportedInputsImpl(
     const onnx::NodeProto& node,
     const NeuronGraphContext& ctx,
     const OpSupportCheckParams& params) const {

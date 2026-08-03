@@ -26,7 +26,7 @@ namespace onnxruntime {
 namespace neuron {
 
 // ---------------------------------------------------------------------------
-// AddToModelBuilder (non-virtual, calls AddToModelBuilderImpl)
+// AddToModelBuilder
 // ---------------------------------------------------------------------------
 NeuronStatus BaseOpBuilder::AddToModelBuilder(ModelBuilder& model_builder,
                                                const onnx::NodeProto& node,
@@ -69,7 +69,8 @@ bool BaseOpBuilder::IsOpSupported(const onnx::NodeProto& node,
   if (capability) {
     if (!capability->IsNodeUnitTypeSupported(node)) return false;
 
-    if (!HasSupportedInputOutputs(node, ctx, params)) return false;
+    if (!HasSupportedInputs(node, ctx, params)) return false;
+    if (!HasSupportedOutputs(node, ctx, params)) return false;
 
     // Reject file-backed external initializers.
     for (int i = 0; i < node.input_size(); ++i) {
@@ -108,11 +109,11 @@ bool BaseOpBuilder::HasSupportedOpSet(const onnx::NodeProto& node) const {
 }
 
 // ---------------------------------------------------------------------------
-// HasSupportedInputOutputs (delegates to subclass hook)
+// HasSupportedInputs
 // ---------------------------------------------------------------------------
-bool BaseOpBuilder::HasSupportedInputOutputs(const onnx::NodeProto& node,
-                                              const NeuronGraphContext& ctx,
-                                              const neuron::OpSupportCheckParams& params) const {
+bool BaseOpBuilder::HasSupportedInputs(const onnx::NodeProto& node,
+                                        const NeuronGraphContext& ctx,
+                                        const neuron::OpSupportCheckParams& params) const {
   // Static-shape guard: we do not support dynamic-shape inputs.
   for (int i = 0; i < node.input_size(); ++i) {
     const auto& name = node.input(i);
@@ -125,30 +126,31 @@ bool BaseOpBuilder::HasSupportedInputOutputs(const onnx::NodeProto& node,
       return false;
     }
   }
-  return HasSupportedInputOutputsImpl(node, ctx, params);
+  return HasSupportedInputsImpl(node, ctx, params);
 }
 
 // ---------------------------------------------------------------------------
-// HasSupportedInputOutputsImpl (default: check input 0 is float or quantized)
+// HasSupportedOutputs
 // ---------------------------------------------------------------------------
-bool BaseOpBuilder::HasSupportedInputOutputsImpl(
-    const onnx::NodeProto& node,
-    const NeuronGraphContext& ctx,
-    const neuron::OpSupportCheckParams& /*params*/) const {
-  if (node.input_size() == 0) return true;  // e.g. Constant
+bool BaseOpBuilder::HasSupportedOutputs(const onnx::NodeProto& node,
+                                         const NeuronGraphContext& ctx,
+                                         const neuron::OpSupportCheckParams& params) const {
+  return HasSupportedOutputsImpl(node, ctx, params);
+}
 
-  const auto& input0 = node.input(0);
-  if (input0.empty()) return true;
+namespace {
+bool IsRepresentableElementType(const onnx::NodeProto& node,
+                                const NeuronGraphContext& ctx,
+                                const std::string& name,
+                                const char* direction,
+                                int index) {
+  if (name.empty()) return true;
 
-  int32_t elem_type = ctx.GetElementType(input0);
+  const int32_t elem_type = ctx.GetElementType(name);
   if (elem_type == 0) {
-    // Type not found – might be a dynamic input or an initializer.
-    // Accept it and let the op builder fail at compile time if needed.
     return true;
   }
-  // Accept float, float16, uint8, int8, int32, bool.
-  // INT64 is intentionally excluded: Neuron SDK cannot represent INT64 operands,
-  // so any node whose primary input is INT64 must fall back to CPU.
+
   switch (elem_type) {
     case onnx::TensorProto::FLOAT:
     case onnx::TensorProto::FLOAT16:
@@ -159,10 +161,33 @@ bool BaseOpBuilder::HasSupportedInputOutputsImpl(
       return true;
     default:
       LOGS_NEURON(VERBOSE) << "Node [" << node.name() << "] op_type ["
-                           << node.op_type() << "]: unsupported input type "
-                           << elem_type;
+                           << node.op_type() << "]: unsupported " << direction
+                           << "[" << index << "] type " << elem_type;
       return false;
   }
+}
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// HasSupportedInputsImpl
+// ---------------------------------------------------------------------------
+bool BaseOpBuilder::HasSupportedInputsImpl(
+    const onnx::NodeProto& node,
+    const NeuronGraphContext& ctx,
+    const neuron::OpSupportCheckParams& /*params*/) const {
+  if (node.input_size() == 0) return true;
+  return IsRepresentableElementType(node, ctx, node.input(0), "input", 0);
+}
+
+// ---------------------------------------------------------------------------
+// HasSupportedOutputsImpl
+// ---------------------------------------------------------------------------
+bool BaseOpBuilder::HasSupportedOutputsImpl(
+    const onnx::NodeProto& node,
+    const NeuronGraphContext& ctx,
+    const neuron::OpSupportCheckParams& /*params*/) const {
+  if (node.output_size() == 0) return true;
+  return IsRepresentableElementType(node, ctx, node.output(0), "output", 0);
 }
 
 // ---------------------------------------------------------------------------

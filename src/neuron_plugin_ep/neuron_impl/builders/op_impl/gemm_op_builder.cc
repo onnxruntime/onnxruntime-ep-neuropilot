@@ -75,7 +75,7 @@ class GemmOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 
@@ -91,6 +91,7 @@ class GemmOpBuilder : public BaseOpBuilder {
     return IsQuantizedGemm(GetQuantizedOpType(node, ctx));
   }
 
+  bool IsComputeHeavy(const onnx::NodeProto& /*node*/) const override { return true; }
 };
 
 
@@ -311,13 +312,13 @@ NeuronStatus GemmOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
 }
 
 // ---------------------------------------------------------------------------
-// HasSupportedInputOutputsImpl
+// HasSupportedInputsImpl
 // ---------------------------------------------------------------------------
-bool GemmOpBuilder::HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
-                                                   const NeuronGraphContext& ctx,
-                                                   const OpSupportCheckParams& params) const {
+bool GemmOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
+                                             const NeuronGraphContext& ctx,
+                                             const OpSupportCheckParams& params) const {
   if (!IsQuantizedOp(node, ctx)) {
-    return BaseOpBuilder::HasSupportedInputOutputsImpl(node, ctx, params);
+    return BaseOpBuilder::HasSupportedInputsImpl(node, ctx, params);
   }
 
   // QDQGemm: check quantized IO types.

@@ -31,7 +31,7 @@ class BinaryOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const neuron::OpSupportCheckParams& params) const override;
 
@@ -149,7 +149,7 @@ int BinaryOpBuilder::GetMinSupportedOpSet(const onnx::NodeProto& node) const {
   return 1;
 }
 
-bool BinaryOpBuilder::HasSupportedInputOutputsImpl(
+bool BinaryOpBuilder::HasSupportedInputsImpl(
     const onnx::NodeProto& node,
     const NeuronGraphContext& ctx,
     const OpSupportCheckParams& params) const {

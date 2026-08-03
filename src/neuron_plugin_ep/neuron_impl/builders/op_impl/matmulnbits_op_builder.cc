@@ -49,9 +49,11 @@ class MatMulNBitsOpBuilder : public BaseOpBuilder {
                                      const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                     const NeuronGraphContext& ctx,
                                     const OpSupportCheckParams& params) const override;
+
+  bool IsComputeHeavy(const onnx::NodeProto& /*node*/) const override { return true; }
 
   bool IsNodeUnitTypeSupported(const onnx::NodeProto& /*node*/) const override { return true; }
 };
@@ -74,10 +76,10 @@ void MatMulNBitsOpBuilder::AddInitializersToSkip(ModelBuilder& model_builder,
 }
 
 // ---------------------------------------------------------------------------
-// HasSupportedInputOutputsImpl
+// HasSupportedInputsImpl
 // ---------------------------------------------------------------------------
 
-bool MatMulNBitsOpBuilder::HasSupportedInputOutputsImpl(
+bool MatMulNBitsOpBuilder::HasSupportedInputsImpl(
     const onnx::NodeProto& node,
     const NeuronGraphContext& ctx,
     const OpSupportCheckParams& /*params*/) const {

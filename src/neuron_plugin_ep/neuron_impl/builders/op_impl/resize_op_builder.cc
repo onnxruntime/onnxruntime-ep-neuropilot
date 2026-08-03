@@ -48,7 +48,7 @@ class ResizeOpBuilder : public BaseOpBuilder {
                                       const NeuronGraphContext& ctx) const override;
 
 
-  bool HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+  bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 
@@ -163,9 +163,9 @@ NeuronStatus ResizeOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
 }
 
 // ---------------------------------------------------------------------------
-// HasSupportedInputOutputsImpl
+// HasSupportedInputsImpl
 // ---------------------------------------------------------------------------
-bool ResizeOpBuilder::HasSupportedInputOutputsImpl(const onnx::NodeProto& node,
+bool ResizeOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
                                                      const NeuronGraphContext& ctx,
                                                      const OpSupportCheckParams& params) const {
   if (!IsTypeSupported(node, ctx, 0, /*is_input*/ true,
