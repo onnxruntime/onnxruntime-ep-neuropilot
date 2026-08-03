@@ -779,12 +779,11 @@ OrtStatus* NeuronWrapper_GetCapability(
 
   auto* state = static_cast<NeuronWrapperState*>(handle);
 
-  // Convert OrtGraph* → onnx::GraphProto using public utility.
-  // This is the replacement for reinterpret_cast<const GraphViewer*>(graph).
+  // Ort::Status owns the OrtStatus; assigning to a raw OrtStatus* frees it here
   onnx::GraphProto graph_proto;
   {
-    OrtStatus* st = OrtEpUtils::OrtGraphToProto(*graph, graph_proto);
-    if (st) return st;
+    Ort::Status st = OrtEpUtils::OrtGraphToProto(*graph, graph_proto);
+    if (!st.IsOK()) return st.release();
   }
 
   // Find supported node groups.
@@ -860,6 +859,12 @@ OrtStatus* NeuronWrapper_GetCapability(
 } catch (const std::exception& e) {
   return ort_api->CreateStatus(ORT_EP_FAIL,
       (std::string("NeuronEP GetCapability exception: ") + e.what()).c_str());
+} catch (...) {
+  // ORT calls GetCapability through a noexcept C function pointer, so anything
+  // that escapes here calls std::terminate and takes the whole process down.
+  // A failed GetCapability is harmless — ORT treats it as claiming nothing.
+  return ort_api->CreateStatus(ORT_EP_FAIL,
+      "NeuronEP GetCapability: unknown exception");
 }
 
 // ---------------------------------------------------------------------------
@@ -888,11 +893,11 @@ OrtStatus* NeuronWrapper_Compile(
     ort_api->Node_GetName(fused_nodes[i], &fused_name_cstr);
     std::string fused_name = fused_name_cstr ? fused_name_cstr : "";
 
-    // Convert the fused subgraph to onnx::GraphProto.
+    // see the ownership note in NeuronWrapper_GetCapability
     onnx::GraphProto subgraph_proto;
     {
-      OrtStatus* st = OrtEpUtils::OrtGraphToProto(*graphs[i], subgraph_proto);
-      if (st) return st;
+      Ort::Status st = OrtEpUtils::OrtGraphToProto(*graphs[i], subgraph_proto);
+      if (!st.IsOK()) return st.release();
     }
 
     // Build NeuronGraphContext.
@@ -956,6 +961,8 @@ OrtStatus* NeuronWrapper_Compile(
 } catch (const std::exception& e) {
   return ort_api->CreateStatus(ORT_EP_FAIL,
       (std::string("NeuronEP Compile exception: ") + e.what()).c_str());
+} catch (...) {
+  return ort_api->CreateStatus(ORT_EP_FAIL, "NeuronEP Compile: unknown exception");
 }
 
 // ---------------------------------------------------------------------------
