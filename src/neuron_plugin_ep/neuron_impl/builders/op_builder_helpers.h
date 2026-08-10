@@ -49,6 +49,11 @@ NeuronStatus AddScalarOperand(ModelBuilder& model_builder,
 NeuronStatus AddNeuronTranspose(ModelBuilder& model_builder, const std::string& data_input, const std::string& perm_input, gsl::span<const int32_t> perm, const std::string& output);
 NeuronStatus AddNeuronReshape(ModelBuilder& model_builder, const std::string& data_input, const std::string& shape_input, const std::vector<int32_t>& shape_value, const std::string& output);
 NeuronStatus AddNeuronSplit(ModelBuilder& model_builder, const std::string& input, int32_t axis, const std::vector<std::string>& outputs);
+
+// Lower an uneven ONNX Split to one NEURON_SLICE per output.
+NeuronStatus AddNeuronUnevenSplit(ModelBuilder& model_builder, const std::string& input, int32_t axis,
+                                  const std::vector<int64_t>& split_sizes,
+                                  const std::vector<std::string>& outputs);
 NeuronStatus AddNeuronBatchNormalization(ModelBuilder& model_builder, const std::string& input1, const std::string& input2, const std::string& input3, const std::string& output1, const std::string& output2, int32_t fuse_code, float output_scale = 0.0f, int32_t output_zero_point = 0);
 NeuronStatus AddBinaryOperator(int32_t op_type, ModelBuilder& model_builder, const std::string& input1, const std::string& input2, bool add_activation, int32_t fuse_code, const std::string& output, float output_scale = 0.0f, int32_t output_zero_point = 0);
 NeuronStatus AddIdentityOp(ModelBuilder& model_builder, const onnx::NodeProto& node, const NeuronGraphContext& ctx);

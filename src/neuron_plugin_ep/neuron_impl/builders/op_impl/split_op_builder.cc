@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <numeric>
 
+#include <functional>
 #include "base_op_builder.h"
 
 namespace onnxruntime {
@@ -62,7 +63,7 @@ void SplitOpBuilder::AddInitializersToSkip(ModelBuilder& model_builder,
 NeuronStatus SplitOpBuilder::AddToModelBuilderImpl(
     ModelBuilder& model_builder,
     const onnx::NodeProto& node,
-    const NeuronGraphContext& /*ctx*/) const {
+    const NeuronGraphContext& ctx) const {
   const auto& input_name = node.input(0);
 
   const int32_t axis = static_cast<int32_t>(NeuronGraphContext::GetAttrInt(node, "axis", 0));
@@ -84,6 +85,22 @@ NeuronStatus SplitOpBuilder::AddToModelBuilderImpl(
   output_names.reserve(static_cast<size_t>(num_outputs));
   for (int32_t i = 0; i < num_outputs; ++i) {
     output_names.push_back(node.output(i));
+  }
+
+  // An explicit "split" input may divide the axis unevenly; NEURON_SPLIT cannot
+  // express that, so those lower to one NEURON_SLICE per output instead.
+  if (node.input_size() > 1 && !node.input(1).empty()) {
+    const auto* splits_tensor = ctx.GetConstantTensor(node.input(1));
+    NEURON_RETURN_IF_NOT(splits_tensor != nullptr,
+                         "Split: 'split' input is not a compile-time constant for node: ", node.name());
+    std::vector<int64_t> splits;
+    NEURON_RETURN_IF_ERROR(NeuronGraphContext::GetInt64Data(*splits_tensor, splits));
+    const bool uneven = std::adjacent_find(splits.begin(), splits.end(),
+                                           std::not_equal_to<int64_t>()) != splits.end();
+    if (uneven) {
+      return op_builder_helpers::AddNeuronUnevenSplit(model_builder, input_name, axis,
+                                                      splits, output_names);
+    }
   }
 
   NEURON_RETURN_IF_ERROR(op_builder_helpers::AddNeuronSplit(model_builder, input_name, axis, output_names));

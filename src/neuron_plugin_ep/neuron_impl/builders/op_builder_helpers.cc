@@ -185,6 +185,56 @@ NeuronStatus AddNeuronSplit(ModelBuilder& model_builder,
   return NeuronStatus::OK();
 }
 
+NeuronStatus AddNeuronUnevenSplit(ModelBuilder& model_builder,
+                                  const std::string& input,
+                                  int32_t axis,
+                                  const std::vector<int64_t>& split_sizes,
+                                  const std::vector<std::string>& outputs) {
+  auto& shaper(model_builder.GetShaper());
+  const auto& operand_indices(model_builder.GetOperandIndices());
+  const auto& operand_types(model_builder.GetOperandTypes());
+
+  const Shape input_shape = shaper[input];
+  const auto rank = input_shape.size();
+  axis = static_cast<int32_t>(HandleNegativeAxis(axis, rank));
+
+  ORT_RETURN_IF_NOT(split_sizes.size() == outputs.size(),
+                    "Split: ", split_sizes.size(), " sizes for ", outputs.size(), " outputs");
+
+  const OperandType& input_operand_type = operand_types.at(input);
+  int32_t offset = 0;
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const auto size_at_axis = static_cast<int32_t>(split_sizes[i]);
+
+    std::vector<int32_t> begin(rank, 0), sizes(rank);
+    for (size_t d = 0; d < rank; ++d) sizes[d] = static_cast<int32_t>(input_shape[d]);
+    begin[axis] = offset;
+    sizes[axis] = size_at_axis;
+
+    Shape output_shape = input_shape;
+    output_shape[axis] = static_cast<uint32_t>(size_at_axis);
+    shaper.AddShape(outputs[i], output_shape);
+
+    std::vector<uint32_t> input_indices{operand_indices.at(input)};
+    const Shape param_dimen{static_cast<uint32_t>(rank)};
+    const std::string begin_name = model_builder.GetUniqueName(outputs[i] + "/begin");
+    const std::string sizes_name = model_builder.GetUniqueName(outputs[i] + "/sizes");
+    ORT_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(
+        begin_name, begin.data(), OperandType(Type::TENSOR_INT32, param_dimen)));
+    ORT_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(
+        sizes_name, sizes.data(), OperandType(Type::TENSOR_INT32, param_dimen)));
+    input_indices.push_back(operand_indices.at(begin_name));
+    input_indices.push_back(operand_indices.at(sizes_name));
+
+    OperandType output_operand_type = input_operand_type;
+    output_operand_type.SetDimensions(output_shape);
+    ORT_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_SLICE, input_indices,
+                                                   {outputs[i]}, {output_operand_type}));
+    offset += size_at_axis;
+  }
+  return NeuronStatus::OK();
+}
+
 NeuronStatus AddNeuronBatchNormalization(ModelBuilder& model_builder,
                                    const std::string& input1,
                                    const std::string& input2,

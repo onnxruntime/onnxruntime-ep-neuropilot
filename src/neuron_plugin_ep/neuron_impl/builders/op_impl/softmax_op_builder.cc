@@ -53,8 +53,31 @@ NeuronStatus SoftMaxOpBuilder::AddToModelBuilderImpl(
     axis = static_cast<int32_t>(HandleNegativeAxis(axis, static_cast<int64_t>(input_shape.size())));
   }
 
+  const auto rank = static_cast<int32_t>(input_shape.size());
+  std::string softmax_input = input;
+  std::string softmax_output = output;
+  std::vector<int32_t> restore_perm;
+  if (axis != rank - 1) {
+    std::vector<int32_t> perm;
+    perm.reserve(static_cast<size_t>(rank));
+    for (int32_t d = 0; d < rank; ++d)
+      if (d != axis) perm.push_back(d);
+    perm.push_back(axis);
+
+    restore_perm.assign(static_cast<size_t>(rank), 0);
+    for (int32_t j = 0; j < rank; ++j)
+      restore_perm[static_cast<size_t>(perm[static_cast<size_t>(j)])] = j;
+
+    softmax_input  = model_builder.GetUniqueName(input + "/softmax_pre");
+    softmax_output = model_builder.GetUniqueName(output + "/softmax_post");
+    const std::string perm_name = model_builder.GetUniqueName(input + "/softmax_perm");
+    NEURON_RETURN_IF_ERROR(op_builder_helpers::AddNeuronTranspose(
+        model_builder, input, perm_name, perm, softmax_input));
+    axis = rank - 1;
+  }
+
   std::vector<uint32_t> input_indices;
-  input_indices.push_back(operand_indices.at(input));
+  input_indices.push_back(operand_indices.at(softmax_input));
   const float beta = 1.0f;
   ADD_SCALAR_OPERAND(model_builder, input_indices, beta);
   ADD_SCALAR_OPERAND(model_builder, input_indices, axis);
@@ -69,6 +92,17 @@ NeuronStatus SoftMaxOpBuilder::AddToModelBuilderImpl(
       qdq && qdq->output_quant_params.has_value()) {
     y_scale      = qdq->output_quant_params->scale;
     y_zero_point = qdq->output_quant_params->zero_point;
+  }
+
+  if (!restore_perm.empty()) {
+    shaper.AddShape(softmax_output, shaper[softmax_input]);
+    const OperandType t_operand_type(operand_types.at(input).type, shaper[softmax_input],
+                                     y_scale, y_zero_point);
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_SOFTMAX, input_indices,
+                                                      {softmax_output}, {t_operand_type}));
+    const std::string restore_name = model_builder.GetUniqueName(output + "/softmax_perm_back");
+    return op_builder_helpers::AddNeuronTranspose(model_builder, softmax_output,
+                                                  restore_name, restore_perm, output);
   }
 
   const OperandType output_operand_type(operand_types.at(input).type, shaper[output],

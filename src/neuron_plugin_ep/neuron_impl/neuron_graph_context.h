@@ -92,6 +92,17 @@ class NeuronGraphContext {
     return (it != initializers.end()) ? it->second : nullptr;
   }
 
+  // Return the TensorProto for a compile-time constant, or nullptr.
+  const onnx::TensorProto* GetConstantTensor(const std::string& name) const {
+    if (const auto* init = GetInitializer(name)) return init;
+    const auto* producer = GetProducer(name);
+    if (producer == nullptr || producer->op_type() != "Constant") return nullptr;
+    for (const auto& attr : producer->attribute()) {
+      if (attr.name() == "value" && attr.has_t()) return &attr.t();
+    }
+    return nullptr;
+  }
+
   // Return the ValueInfoProto for a named value (input/output/intermediate),
   // or nullptr if not found.
   const onnx::ValueInfoProto* GetValueInfo(const std::string& name) const {
