@@ -559,6 +559,32 @@ NeuronStatus ModelBuilder::AddQDQOperandAlias(const onnx::NodeProto& dq_or_q_nod
     return NeuronStatus::OK();
   }
 
+  // TODO: proper QuantizeLinear support. Emit a real NEURON_QUANTIZE instead.
+  if (!is_dq) {
+    const auto src_type_it = operand_types_.find(src_name);
+    if (src_type_it != operand_types_.end() &&
+        (src_type_it->second.type == Type::TENSOR_FLOAT32 ||
+         src_type_it->second.type == Type::TENSOR_FLOAT16)) {
+      float scale = 0.0f;
+      int32_t zp = 0;
+      NEURON_RETURN_IF_ERROR(ctx_.GetScalarFloat(dq_or_q_node.input(1), scale));
+      if (dq_or_q_node.input_size() > 2 && !dq_or_q_node.input(2).empty()) {
+        NEURON_RETURN_IF_ERROR(ctx_.GetScalarInt32(dq_or_q_node.input(2), zp));
+      }
+      int32_t onnx_dtype = ctx_.GetElementType(dst_name);
+      if (onnx_dtype == 0) onnx_dtype = onnx::TensorProto::UINT8;
+      wrapper::OnnxDataTypeInfo info;
+      info.onnx_data_type = onnx_dtype;
+      info.scales         = {scale};
+      info.zero_points    = {zp};
+      shaper_.AddShape(dst_name, shaper_[src_name]);
+      LOGS_NEURON(VERBOSE) << "QDQ alias: source '" << src_name
+                           << "' is float; emitting NEURON_QUANTIZE for '"
+                           << dst_name << "'";
+      return AddQuantizeLinear(src_name, info, dst_name);
+    }
+  }
+
   // Register the alias — must mirror all three tracking structures that
   // RegisterOperand() populates, so that RegisterModelOutputs()'s
   // Contains(operands_, name) check succeeds when a Q output is a graph output.

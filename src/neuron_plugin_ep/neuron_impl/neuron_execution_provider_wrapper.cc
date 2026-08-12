@@ -28,6 +28,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <system_error>
@@ -403,10 +405,6 @@ static std::vector<std::vector<int>> FindSupportedGroups(
 
     // Force-skipped ops.
     if (state->force_skip_ops.count(op)) continue;
-
-    // Standalone (non-absorbed) DQ/Q are never claimed: a single-node DQ/Q
-    // subgraph has no op to lower and hangs the Neuron SDK at compile time.
-    if (op == "DequantizeLinear" || op == "QuantizeLinear") continue;
 
     // Op-builder support check.
     const auto it = op_builders.find(op);

@@ -129,11 +129,6 @@ NeuronStatus ConvOpBuilder::AddToModelBuilderImpl(
 
   // Helper: compute bias OperandType for a quantized Conv.
   // Neuron SDK requires bias_scale[c] = input_scale * weight_scale[c].
-  // For per-channel weight, compute per-channel INT32 scales via the QDQ group's
-  // stored weight quant params.  The per-channel scales are then communicated to
-  // Neuron via NeuronModel_setOperandSymmPerChannelQuantParams on the INT32 bias
-  // operand (triggered inside AddNewNeuronOperand when channelQuant is set).
-  // For per-tensor weight, a single scalar scale suffices.
   const auto make_quant_bias_type = [&](const Shape& bias_shape) -> OperandType {
     const float input_scale = operand_types.at(input).operandType.scale;
 
@@ -146,16 +141,7 @@ NeuronStatus ConvOpBuilder::AddToModelBuilderImpl(
         !qdq->input_quant_params[1]->per_channel_scales.empty();
 
     if (per_ch) {
-      const auto& w_scales = qdq->input_quant_params[1]->per_channel_scales;
-      std::vector<float> b_scales(w_scales.size());
-      for (size_t c = 0; c < w_scales.size(); ++c)
-        b_scales[c] = input_scale * w_scales[c];
-      wrapper::OnnxDataTypeInfo info;
-      info.onnx_data_type = onnx::TensorProto::INT32;
-      info.scales         = b_scales;
-      info.zero_points    = std::vector<int32_t>(b_scales.size(), 0);
-      info.channel_dim    = 0;  // bias is 1-D; channel axis is 0
-      return OperandType(info, bias_shape);
+      return OperandType(Type::TENSOR_INT32, bias_shape, 0.0f, 0);
     }
 
     // Per-tensor: single scale = input_scale * weight_scale.
@@ -178,6 +164,11 @@ NeuronStatus ConvOpBuilder::AddToModelBuilderImpl(
     if (weight_type == Type::TENSOR_FLOAT32) {
       std::vector<float> buffer(bias_shape[0], 0.0f);
       const OperandType bias_operand_type(Type::TENSOR_FLOAT32, bias_shape, 0.0f);
+      NEURON_RETURN_IF_ERROR(
+          model_builder.AddOperandFromPersistMemoryBuffer(bias, buffer.data(), bias_operand_type));
+    } else if (weight_type == Type::TENSOR_FLOAT16) {
+      std::vector<uint16_t> buffer(bias_shape[0], 0);
+      const OperandType bias_operand_type(Type::TENSOR_FLOAT16, bias_shape, 0.0f);
       NEURON_RETURN_IF_ERROR(
           model_builder.AddOperandFromPersistMemoryBuffer(bias, buffer.data(), bias_operand_type));
     } else if (weight_type == Type::TENSOR_QUANT8_ASYMM ||

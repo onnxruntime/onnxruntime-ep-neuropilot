@@ -296,7 +296,8 @@ void DetectQDQGroups(
       }
     }
 
-    if (group.dq_node_indices.empty() && !found_q) continue;  // no QDQ wrapping
+    // Handle  edges with explicit NEURON_QUANTIZE / NEURON_DEQUANTIZE.
+    if (group.dq_node_indices.empty() || !found_q) continue;
     candidates.push_back(std::move(group));
   }
 

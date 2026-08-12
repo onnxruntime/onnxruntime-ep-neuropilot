@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <chrono>
 #include <gsl/span>
+#include <thread>
 
 #include "neuron_wrapper_model.h"
 
@@ -217,8 +219,27 @@ NeuronStatus Execution::SetOutputFast(int32_t index, void* buffer, size_t byte_s
   return NeuronStatus::OK();
 }
 
+// The Neuron API splits its failure codes into TRANSIENT and PERSISTENT pairs.
+// TODO: try to understand what this means.
+static bool IsTransientNeuronError(int code) {
+  return code == NEURON_MISSED_DEADLINE_TRANSIENT ||
+         code == NEURON_RESOURCE_EXHAUSTED_TRANSIENT;
+}
+
 NeuronStatus Execution::Predict() {
-  NEURON_RETURN_STATUS_ON_ERROR(neuron_.NeuronExecution_compute(execution_));
+  constexpr int kMaxAttempts = 3;
+  int result = NEURON_NO_ERROR;
+  for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+    result = neuron_.NeuronExecution_compute(execution_);
+    if (!IsTransientNeuronError(result)) break;
+    LOGS_NEURON(VERBOSE) << "NeuronExecution_compute returned transient error "
+                         << result << " (attempt " << attempt << " of "
+                         << kMaxAttempts << "); retrying";
+
+    if (attempt < kMaxAttempts)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5 * attempt));
+  }
+  NEURON_RETURN_STATUS_ON_ERROR(result);
   return NeuronStatus::OK();
 }
 

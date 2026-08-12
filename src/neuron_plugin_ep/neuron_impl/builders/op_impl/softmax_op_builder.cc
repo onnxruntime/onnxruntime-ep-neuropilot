@@ -88,10 +88,18 @@ NeuronStatus SoftMaxOpBuilder::AddToModelBuilderImpl(
   // provider Neuron EP, which reads y_scale/y_zp from the output NodeUnit.
   float y_scale = 0.0f;
   int32_t y_zero_point = 0;
-  if (const auto* qdq = ctx.GetQDQGroup(output);
-      qdq && qdq->output_quant_params.has_value()) {
-    y_scale      = qdq->output_quant_params->scale;
-    y_zero_point = qdq->output_quant_params->zero_point;
+  const Type softmax_in_type = operand_types.at(softmax_input).type;
+  const bool quant_domain =
+      softmax_in_type == Type::TENSOR_QUANT8_ASYMM ||
+      softmax_in_type == Type::TENSOR_QUANT8_ASYMM_SIGNED;
+
+  // TODO: rework this to use the QDQ group info instead of checking for QLinearSoftmax.
+  if (quant_domain) {
+    if (const auto* qdq = ctx.GetQDQGroup(output);
+        qdq && qdq->output_quant_params.has_value()) {
+      y_scale      = qdq->output_quant_params->scale;
+      y_zero_point = qdq->output_quant_params->zero_point;
+    }
   }
 
   if (!restore_perm.empty()) {
