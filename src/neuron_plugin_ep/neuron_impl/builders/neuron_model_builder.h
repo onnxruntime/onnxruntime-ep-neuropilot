@@ -186,6 +186,15 @@ class ModelBuilder {
   std::unordered_set<std::string> fused_activations_;
   std::unordered_set<std::string> skipped_initializers_;
 
+  // Which node claimed each skip, recorded during PreprocessInitializers.
+  // A skip is only honoured when *every* node that consumes the tensor claimed
+  // it; see PruneUnsafeInitializerSkips.
+  std::unordered_map<std::string, std::unordered_set<const onnx::NodeProto*>>
+      initializer_skip_claims_;
+  // Node currently being offered to AddInitializersToSkip (null outside of
+  // PreprocessInitializers).
+  const onnx::NodeProto* skip_claim_node_{nullptr};
+
   // Activation node map: output_name → fuse_code.
   std::unordered_map<std::string, int32_t> activation_output_map_;
 
@@ -209,6 +218,7 @@ class ModelBuilder {
 
   NeuronStatus ComposeNeuronModel();
   void PreprocessInitializers();
+  void PruneUnsafeInitializerSkips();
   void PreprocessActivations();
   NeuronStatus RegisterInitializers();
   NeuronStatus RegisterModelInputs(bool add_new_operand);

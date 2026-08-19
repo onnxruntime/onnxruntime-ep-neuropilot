@@ -92,6 +92,12 @@ DEFINE_ADD_OPERAND_FROM_SCALAR(float, FLOAT32)
 // ---------------------------------------------------------------------------
 void ModelBuilder::AddInitializerToSkip(const std::string& tensor_name) {
   skipped_initializers_.insert(tensor_name);
+  // Remember which node asked.  A builder only ever speaks for its *own* use of
+  // the tensor, so the claim is provisional until PruneUnsafeInitializerSkips
+  // confirms no other consumer still needs a real operand.
+  if (skip_claim_node_ != nullptr) {
+    initializer_skip_claims_[tensor_name].insert(skip_claim_node_);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +132,64 @@ void ModelBuilder::PreprocessInitializers() {
   for (const auto& node : ctx_.graph.node()) {
     const auto it = op_builders.find(node.op_type());
     if (it != op_builders.end()) {
+      skip_claim_node_ = &node;
       it->second->AddInitializersToSkip(*this, node, ctx_);
+    }
+  }
+  skip_claim_node_ = nullptr;
+  PruneUnsafeInitializerSkips();
+}
+
+// ---------------------------------------------------------------------------
+// PruneUnsafeInitializerSkips
+//
+// AddInitializerToSkip is keyed by tensor *name* and applies to the whole
+// partition, but each builder only speaks for its own use of that tensor.  When
+// ORT's constant folding + CSE collapse several identical scalars into a single
+// initializer, one tensor can serve two incompatible roles at once, e.g.
+//
+//   Clip(x, -1, K)   K is the clip bound  → folded into NEURON_RELU1, no operand
+//   Sub(K, v)        K is a real data input → must exist in operand_indices_
+//
+// Honouring Clip's skip in that case drops the operand Sub needs, and Sub's
+// operand_indices_.at(K) throws std::out_of_range ("_Map_base::at") during
+// compile.  So a skip is only safe when *every* node that consumes the tensor
+// asked to skip it; otherwise the tensor is registered normally and the
+// claiming builders simply do not reference the operand.
+//
+// Nodes absorbed into a QDQ group are not consumers: they are never built, so
+// e.g. a quantized Conv weight reached via an absorbed DequantizeLinear stays
+// skipped as intended.
+// ---------------------------------------------------------------------------
+void ModelBuilder::PruneUnsafeInitializerSkips() {
+  if (skipped_initializers_.empty()) return;
+
+  // tensor name → nodes that actually consume it and will be built
+  std::unordered_map<std::string, std::vector<const onnx::NodeProto*>> consumers;
+  for (int i = 0; i < ctx_.graph.node_size(); ++i) {
+    if (ctx_.qdq_absorbed_node_indices.count(i)) continue;
+    const auto& node = ctx_.graph.node(i);
+    for (const auto& input : node.input()) {
+      if (input.empty()) continue;
+      if (!Contains(skipped_initializers_, input)) continue;
+      auto& v = consumers[input];
+      if (std::find(v.begin(), v.end(), &node) == v.end()) v.push_back(&node);
+    }
+  }
+
+  for (const auto& [name, nodes] : consumers) {
+    const auto claims_it = initializer_skip_claims_.find(name);
+    for (const auto* node : nodes) {
+      const bool claimed = claims_it != initializer_skip_claims_.end() &&
+                           claims_it->second.count(node) != 0;
+      if (claimed) continue;
+      // This consumer expects a real operand — the skip cannot be honoured.
+      LOGS_NEURON(VERBOSE)
+          << "Initializer [" << name << "] was marked skipped, but node ["
+          << node->name() << "] op_type [" << node->op_type()
+          << "] consumes it as a real input; registering it as an operand";
+      skipped_initializers_.erase(name);
+      break;
     }
   }
 }
