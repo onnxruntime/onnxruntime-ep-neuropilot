@@ -356,8 +356,8 @@ if(ORTNeuronEp_INSTALL)
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/ortneuronep"
   )
   install(TARGETS onnxruntime_providers_neuron
-          LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-          EXPORT ORTNeuronEpTargets)
+          EXPORT ORTNeuronEpTargets
+          LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
   install(TARGETS GSL
           EXPORT ORTNeuronEpTargets)
   install(EXPORT ORTNeuronEpTargets
