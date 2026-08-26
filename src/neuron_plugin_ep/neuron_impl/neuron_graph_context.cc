@@ -34,8 +34,10 @@ NeuronGraphContext::NeuronGraphContext(const onnx::GraphProto& g)
     value_infos[vi.name()] = &vi;
   }
 
-  // Build output_producers map.
-  for (const auto& node : graph.node()) {
+  // Build output_producers and node_indices maps.
+  for (int i = 0; i < graph.node_size(); ++i) {
+    const auto& node = graph.node(i);
+    node_indices[&node] = i;
     for (const auto& out : node.output()) {
       if (!out.empty()) {
         output_producers[out] = &node;

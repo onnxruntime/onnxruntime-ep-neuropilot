@@ -9,6 +9,7 @@
 #include "../neuron_graph_context.h"
 #include "../neuron_lib/neuron_types.h"
 #include "../neuron_lib/neuron_wrapper_device.h"
+#include "../op_capability_abi/neuron_op_capability_abi.h"
 #include "neuron_model_builder.h"
 
 namespace onnxruntime {
@@ -24,6 +25,11 @@ struct OpSupportCheckParams {
 
   // NEURON_FLAG_USE_FP16; the matrix ops only accept float32 when it is set
   bool use_fp16 = false;
+
+  // Borrowed handle to the op capability library's copy of the graph, valid
+  // for one GetCapability() call. Null if the library is unavailable or
+  // rejected the graph. Owned by CapabilityGraphHandle in the caller.
+  NeuronCapGraph* cap_graph = nullptr;
 };
 
 class IOpBuilder {

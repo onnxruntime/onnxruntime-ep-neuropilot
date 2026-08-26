@@ -18,12 +18,41 @@
 
 #include "base_op_builder.h"
 
+#include <cstdint>
+#include <vector>
+
 #include <onnx/onnx_pb.h>
 
 #include "../../op_capability_abi/op_capability_loader.h"
 
 namespace onnxruntime {
 namespace neuron {
+
+namespace {
+
+// Flattens OpSupportCheckParams into the POD form the C ABI accepts.
+// `name_storage` must outlive the returned struct: device_names points into it.
+NeuronCapParams ToCapParams(const OpSupportCheckParams& params,
+                            std::vector<const char*>& name_storage) {
+  name_storage.clear();
+  name_storage.reserve(params.devices.size());
+  for (const auto& device : params.devices) {
+    name_storage.push_back(device.name.c_str());
+  }
+
+  NeuronCapParams out{};
+  out.struct_size = static_cast<uint32_t>(sizeof(NeuronCapParams));
+  out.version_major = static_cast<uint32_t>(params.version.major);
+  out.version_minor = static_cast<uint32_t>(params.version.minor);
+  out.version_patch = static_cast<uint32_t>(params.version.patch);
+  out.device_names = name_storage.empty() ? nullptr : name_storage.data();
+  out.device_count = name_storage.size();
+  out.use_nchw = params.use_nchw ? 1 : 0;
+  out.use_fp16 = params.use_fp16 ? 1 : 0;
+  return out;
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // AddToModelBuilder
@@ -65,9 +94,35 @@ bool BaseOpBuilder::IsOpSupported(const onnx::NodeProto& node,
     return false;
   }
 
-  const auto* capability = loader.GetCapability(node.op_type());
-  if (capability) {
-    if (!capability->IsNodeUnitTypeSupported(node)) return false;
+  const int32_t has_capability = loader.HasCapability(node.op_type());
+  if (has_capability == NEURON_CAP_ERROR) {
+    // ERROR must not fall through to the default-supported path below.
+    LOGS_NEURON(ERROR) << "Capability lookup failed for op_type [" << node.op_type()
+                       << "]; rejecting operator.";
+    return false;
+  }
+
+  if (has_capability == NEURON_CAP_TRUE) {
+    // The library addresses nodes by index; resolve the reference back to one.
+    const int node_index = ctx.GetNodeIndex(node);
+    if (node_index < 0 || params.cap_graph == nullptr) {
+      LOGS_NEURON(ERROR) << "Cannot query capability for node [" << node.name()
+                         << "] op_type [" << node.op_type() << "]: "
+                         << (node_index < 0 ? "node does not belong to this graph context"
+                                            : "no capability graph handle for this call")
+                         << "; rejecting operator.";
+      return false;
+    }
+
+    const int32_t unit_type_ok =
+        loader.IsNodeUnitTypeSupported(params.cap_graph, node_index);
+    if (unit_type_ok == NEURON_CAP_ERROR) {
+      LOGS_NEURON(ERROR) << "Capability check failed for node [" << node.name()
+                         << "] op_type [" << node.op_type()
+                         << "] (unit type); rejecting operator.";
+      return false;
+    }
+    if (unit_type_ok != NEURON_CAP_TRUE) return false;
 
     if (!HasSupportedInputs(node, ctx, params)) return false;
     if (!HasSupportedOutputs(node, ctx, params)) return false;
@@ -85,7 +140,17 @@ bool BaseOpBuilder::IsOpSupported(const onnx::NodeProto& node,
       }
     }
 
-    return capability->IsOpSupported(node, ctx, params);
+    std::vector<const char*> device_names;
+    const NeuronCapParams cap_params = ToCapParams(params, device_names);
+
+    const int32_t supported =
+        loader.IsNodeSupported(params.cap_graph, node_index, &cap_params);
+    if (supported == NEURON_CAP_ERROR) {
+      LOGS_NEURON(ERROR) << "Capability check failed for node [" << node.name()
+                         << "] op_type [" << node.op_type() << "]; rejecting operator.";
+      return false;
+    }
+    return supported == NEURON_CAP_TRUE;
   }
 
   // Op exists in loaded library but has no capability registered —

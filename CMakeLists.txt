@@ -305,10 +305,8 @@ endif()
 # op_capability: the per-op capability logic ships as a prebuilt closed-source
 # libneuron_op_capability.so that this EP dlopen()s at runtime.
 #
-# The only op_capability code in this repo is the runtime bridge under
-# neuron_impl/op_capability_abi/ (op_capability_interface.h, op_capability_loader.*).
-# op_capability_loader.cc is a plain .cc under NEURON_IMPL_DIR, so it is already
-# picked up by the NEURON_EP_SOURCES glob above — no special handling needed.
+# This repo only carries the runtime bridge under neuron_impl/op_capability_abi/;
+# its .cc files are picked up by the NEURON_EP_SOURCES glob above.
 #
 # Nothing here builds or links that .so; it is only required to be
 # present (see the find_library check further below).

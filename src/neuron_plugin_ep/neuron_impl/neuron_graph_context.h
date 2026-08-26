@@ -57,6 +57,11 @@ class NeuronGraphContext {
   // output name → NodeProto* that produces it.
   std::unordered_map<std::string, const onnx::NodeProto*> output_producers;
 
+  // NodeProto* → its index in graph.node(); the C ABI addresses nodes by index.
+  // A map because RepeatedPtrField does not store messages contiguously, so
+  // pointer arithmetic on graph.node() would be UB.
+  std::unordered_map<const onnx::NodeProto*, int> node_indices;
+
   // Topologically sorted node indices into graph.node().
   // (In a valid ONNX model nodes are already in topological order, but we
   //  store the sorted list explicitly for clarity.)
@@ -125,6 +130,13 @@ class NeuronGraphContext {
   const onnx::NodeProto* GetProducer(const std::string& output_name) const {
     auto it = output_producers.find(output_name);
     return (it != output_producers.end()) ? it->second : nullptr;
+  }
+
+  // Index of `node` within graph.node(), or -1 if it does not belong to this
+  // graph context.
+  int GetNodeIndex(const onnx::NodeProto& node) const {
+    auto it = node_indices.find(&node);
+    return (it != node_indices.end()) ? it->second : -1;
   }
 
   // ---- Attribute helpers ---------------------------------------------------

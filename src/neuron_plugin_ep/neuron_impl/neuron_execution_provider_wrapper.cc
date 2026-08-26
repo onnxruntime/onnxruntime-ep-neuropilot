@@ -55,6 +55,7 @@
 #include "builders/op_builder_factory.h"
 #include "neuron_lib/neuron_implementation.h"
 #include "neuron_lib/neuron_wrapper_device.h"
+#include "op_capability_abi/op_capability_loader.h"
 #include "neuron_lib/neuron_wrapper_model.h"
 #include "../neuron_provider_factory.h"
 
@@ -653,6 +654,16 @@ static std::vector<std::vector<int>> FindSupportedGroups(
   check_params.devices  = state->neuron_target_devices;
   check_params.use_nchw = (state->neuron_flags & NEURON_FLAG_USE_NCHW) != 0;
   check_params.use_fp16 = (state->neuron_flags & NEURON_FLAG_USE_FP16) != 0;
+
+  // One capability-library copy of the graph per partitioning pass, not per
+  // node. The handle must outlive every IsOpSupported call below.
+  op_capability::CapabilityGraphHandle cap_graph(graph_proto);
+  if (!cap_graph.valid()) {
+    LOGS_NEURON(ERROR) << "Could not hand the graph to the op capability library; "
+                       << "no nodes will be assigned to Neuron.";
+    return groups;
+  }
+  check_params.cap_graph = cap_graph.get();
 
   // ──────────────────────────────────────────────────────────────────────
   // Phase A: per-node support determination (independent of grouping).
