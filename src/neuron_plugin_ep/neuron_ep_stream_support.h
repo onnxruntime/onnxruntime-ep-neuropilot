@@ -16,7 +16,7 @@ class NeuronStreamImpl : public OrtSyncStreamImpl, public ApiPtrs {
  public:
   NeuronStreamImpl(NeuronEpFactory& factory, const OrtEp* /*ep*/)
       : ApiPtrs(factory), factory_{&factory} {
-    ort_version_supported = ORT_API_VERSION;
+    ort_version_supported = ort_api_version;
     CreateNotification    = CreateNotificationImpl;
     GetHandle             = GetHandleImpl;
     Flush                 = FlushImpl;
@@ -42,7 +42,7 @@ class NeuronStreamImpl : public OrtSyncStreamImpl, public ApiPtrs {
 class NeuronNotificationImpl : public OrtSyncNotificationImpl, public ApiPtrs {
  public:
   explicit NeuronNotificationImpl(const ApiPtrs& apis) : ApiPtrs(apis) {
-    ort_version_supported = ORT_API_VERSION;
+    ort_version_supported = ort_api_version;
     Activate              = ActivateImpl;
     WaitOnDevice          = WaitOnDeviceImpl;
     WaitOnHost            = WaitOnHostImpl;

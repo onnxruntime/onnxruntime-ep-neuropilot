@@ -81,7 +81,7 @@ EXPORT_SYMBOL OrtStatus* CreateEpFactories(
   // 5. Create the factory.  The EP name is NeuronEpFactory::kEpName, not the
   //    registration name.
   auto factory = std::make_unique<NeuronEpFactory>(
-      ApiPtrs{*ort_api, *ep_api, *model_editor_api},
+      ApiPtrs{*ort_api, *ep_api, *model_editor_api, ort_api_version},
       *default_logger,
       ort_api_version);
 

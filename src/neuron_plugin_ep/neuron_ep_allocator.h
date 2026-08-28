@@ -27,7 +27,7 @@ using AllocatorUniquePtr = std::unique_ptr<BaseAllocator>;
 struct CustomAllocator : BaseAllocator {
   CustomAllocator(const OrtMemoryInfo* mem_info, const ApiPtrs& apis)
       : memory_info_{mem_info}, apis_{apis} {
-    version      = ORT_API_VERSION;
+    version      = apis.ort_api_version;
     Alloc        = AllocImpl;
     Free         = FreeImpl;
     Info         = InfoImpl;

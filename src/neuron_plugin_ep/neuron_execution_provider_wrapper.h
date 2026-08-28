@@ -42,11 +42,15 @@ extern "C" {
 //     "NEURON_FLAG_FORCE_SKIP_OPS_STRING"– comma-separated list of ops to skip
 //
 // Returns nullptr on failure (logs internally).
+// ort_api_version is the negotiated ORT API version (see CreateEpFactories);
+// it may be lower than the ORT_API_VERSION this library was compiled against
+// and is what gets reported in every ort_version_supported field.
 NeuronWrapperHandle NeuronWrapper_Create(
     const OrtApi*            ort_api,
     const OrtEpApi*          ep_api,
     const OrtModelEditorApi* model_editor_api,
-    const OrtKeyValuePairs*  provider_options);
+    const OrtKeyValuePairs*  provider_options,
+    uint32_t                 ort_api_version);
 
 // Destroy a handle returned by NeuronWrapper_Create.
 void NeuronWrapper_Destroy(NeuronWrapperHandle handle);

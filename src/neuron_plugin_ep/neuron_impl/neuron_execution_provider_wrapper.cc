@@ -69,6 +69,8 @@ struct NeuronWrapperState {
   const OrtApi*            ort_api{nullptr};
   const OrtEpApi*          ep_api{nullptr};
   const OrtModelEditorApi* model_editor_api{nullptr};
+  // Negotiated at load time; may be < ORT_API_VERSION.  See CreateEpFactories.
+  uint32_t                 ort_api_version{0};
 
   // Provider option flags (copied from OrtKeyValuePairs at Create time).
   uint32_t neuron_flags{0};
@@ -128,7 +130,7 @@ struct NeuronNodeComputeInfo : OrtNodeComputeInfo {
 
   NeuronNodeComputeInfo(NeuronWrapperState* s, std::string name, const OrtApi* api)
       : state(s), fused_node_name(std::move(name)), ort_api(api) {
-    ort_version_supported = ORT_API_VERSION;
+    ort_version_supported = s->ort_api_version;
     CreateState  = CreateStateImpl;
     Compute      = ComputeImpl;
     ReleaseState = ReleaseStateImpl;
@@ -875,7 +877,8 @@ NeuronWrapperHandle NeuronWrapper_Create(
     const OrtApi*            ort_api,
     const OrtEpApi*          ep_api,
     const OrtModelEditorApi* model_editor_api,
-    const OrtKeyValuePairs*  provider_options) {
+    const OrtKeyValuePairs*  provider_options,
+    uint32_t                 ort_api_version) {
 
   auto* s = new (std::nothrow) NeuronWrapperState{};
   if (!s) return nullptr;
@@ -883,6 +886,7 @@ NeuronWrapperHandle NeuronWrapper_Create(
   s->ort_api          = ort_api;
   s->ep_api           = ep_api;
   s->model_editor_api = model_editor_api;
+  s->ort_api_version  = ort_api_version;
 
   // Parse provider options.
   auto get = [&](const char* k) { return GetKV(ort_api, provider_options, k); };
@@ -979,7 +983,7 @@ OrtStatus* NeuronWrapper_GetCapability(
         continue;
 
       OrtNodeFusionOptions opts{};
-      opts.ort_version_supported      = ORT_API_VERSION;
+      opts.ort_version_supported      = state->ort_api_version;
       opts.drop_constant_initializers = false;
 
       if (OrtStatus* st = ep_api->EpGraphSupportInfo_AddNodesToFuse(
@@ -1065,7 +1069,7 @@ OrtStatus* NeuronWrapper_GetCapability(
     if (group_nodes.empty()) continue;
 
     OrtNodeFusionOptions opts{};
-    opts.ort_version_supported      = ORT_API_VERSION;
+    opts.ort_version_supported      = state->ort_api_version;
     opts.drop_constant_initializers = false;
 
     OrtStatus* st = ep_api->EpGraphSupportInfo_AddNodesToFuse(

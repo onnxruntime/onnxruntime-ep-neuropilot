@@ -60,11 +60,16 @@
 // Core structs
 // ---------------------------------------------------------------------------
 
-// Bundles the three ORT API pointers every EP file needs.
+// Bundles the three ORT API pointers every EP file needs, plus the ORT API
+// version that was actually negotiated at load time (see CreateEpFactories).
+// Always report *that* version in an ort_version_supported field, never
+// ORT_API_VERSION: the latter is the version this library was compiled
+// against, which may be newer than the runtime we ended up loaded into.
 struct ApiPtrs {
   const OrtApi&            ort_api;
   const OrtEpApi&          ep_api;
   const OrtModelEditorApi& model_editor_api;
+  uint32_t                 ort_api_version;
 };
 
 // ---------------------------------------------------------------------------

@@ -25,13 +25,13 @@ NeuronEp::NeuronEp(NeuronEpFactory& factory,
       name_{ep_name},
       config_{config},
       logger_{logger} {
-  ort_version_supported = ORT_API_VERSION;
+  ort_version_supported = ort_api_version;
 
   // Create the per-session Neuron handle.  provider_options carries flags
   // like NEURON_FLAG_USE_FP16, NEURON_FLAG_CPU_DISABLED, etc.
   neuron_handle_ = NeuronWrapper_Create(
       &ort_api, &ep_api, &model_editor_api,
-      config_.provider_options);
+      config_.provider_options, ort_api_version);
   if (!neuron_handle_) {
     IGNORE_ORTSTATUS(ort_api.Logger_LogMessage(
         &logger_, ORT_LOGGING_LEVEL_ERROR,
