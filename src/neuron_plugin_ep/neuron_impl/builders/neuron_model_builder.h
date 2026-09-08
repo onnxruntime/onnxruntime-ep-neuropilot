@@ -115,7 +115,20 @@ class ModelBuilder {
       ModelBuilder::DataLayout new_layout,
       const std::string& new_operand_name);
 
+  // Registers a Neuron model input the EP fills on the host each inference
+  NeuronStatus AddSynthModelInput(const std::string& name,
+                                   const neuron::wrapper::OperandType& operand_type,
+                                   neuron::wrapper::Model::SynthInput::Kind kind,
+                                   uint32_t& index);
+  // fp32 rotary tables (rows [0, max_seq), row length half) used to fill the
+  // cos/sin row inputs, and the name of the graph input carrying seqlens_k.
+  void SetSynthRotaryTables(std::vector<float> cos_rows, std::vector<float> sin_rows,
+                            uint32_t half);
+  void SetSynthSeqlensName(const std::string& name);
+
   void AddInitializerToSkip(const std::string& tensor_name);
+  // Excludes a graph input from Neuron model registration.
+  void AddInputToSkip(const std::string& tensor_name);
   void RegisterOperand(const std::string& name, uint32_t index,
                        const neuron::wrapper::OperandType& operand_type);
   std::string GetUniqueName(const std::string& base_name);
@@ -189,6 +202,7 @@ class ModelBuilder {
   std::unordered_set<std::string> operands_;
   std::unordered_set<std::string> fused_activations_;
   std::unordered_set<std::string> skipped_initializers_;
+  std::unordered_set<std::string> skipped_inputs_;
 
   // Which node claimed each skip, recorded during PreprocessInitializers.
   // A skip is only honoured when *every* node that consumes the tensor claimed

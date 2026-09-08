@@ -90,6 +90,10 @@ DEFINE_ADD_OPERAND_FROM_SCALAR(float, FLOAT32)
 // ---------------------------------------------------------------------------
 // AddInitializerToSkip
 // ---------------------------------------------------------------------------
+void ModelBuilder::AddInputToSkip(const std::string& tensor_name) {
+  skipped_inputs_.insert(tensor_name);
+}
+
 void ModelBuilder::AddInitializerToSkip(const std::string& tensor_name) {
   skipped_initializers_.insert(tensor_name);
   // Remember which node asked.  A builder only ever speaks for its *own* use of
@@ -414,10 +418,22 @@ NeuronStatus ModelBuilder::RegisterModelInputs(bool add_new_operand) {
   // it at input(0).  Used below to recover scale/ZP for quantized graph inputs
   // whose ONNX type proto carries no quantization annotation.
   std::unordered_map<std::string, const onnx::NodeProto*> dq_consumer;
+  std::unordered_map<std::string, float> gqa_cache_scale;
   for (const auto& node : ctx_.graph.node()) {
     if (node.op_type() == "DequantizeLinear" &&
         node.input_size() >= 2 && !node.input(0).empty()) {
       dq_consumer.emplace(node.input(0), &node);
+    }
+    if (node.op_type() == "GroupQueryAttention" && node.input_size() >= 14) {
+      float scale = 0.0f;
+      if (!node.input(3).empty() && !node.input(12).empty() &&
+          ctx_.GetScalarFloat(node.input(12), scale).IsOK()) {
+        gqa_cache_scale.emplace(node.input(3), scale);
+      }
+      if (!node.input(4).empty() && !node.input(13).empty() &&
+          ctx_.GetScalarFloat(node.input(13), scale).IsOK()) {
+        gqa_cache_scale.emplace(node.input(4), scale);
+      }
     }
   }
 
@@ -427,10 +443,13 @@ NeuronStatus ModelBuilder::RegisterModelInputs(bool add_new_operand) {
     // Skip initializers (they were handled in RegisterInitializers)
     if (ctx_.IsInitializer(name)) continue;
 
+    if (Contains(skipped_inputs_, name)) continue;
+
     // Skip if already registered
     if (Contains(operands_, name)) continue;
 
     Shape shape = shaper_[name];
+    if (shape.empty()) shape.push_back(1);
 
     const auto& type_proto = input.type();
     if (!type_proto.has_tensor_type() || !type_proto.tensor_type().has_elem_type()) {
@@ -461,6 +480,10 @@ NeuronStatus ModelBuilder::RegisterModelInputs(bool add_new_operand) {
             ctx_.GetScalarInt32(dq->input(2), zp);  // best-effort; zp stays 0 on failure
           type_info.zero_points = {zp};
         }
+      } else if (const auto gqa_it = gqa_cache_scale.find(name);
+                 gqa_it != gqa_cache_scale.end()) {
+        type_info.scales = {gqa_it->second};
+        type_info.zero_points = {0};
       }
     }
 
@@ -482,6 +505,39 @@ NeuronStatus ModelBuilder::RegisterModelInputs(bool add_new_operand) {
     neuron_model_->AddInput(name, operand_type);
   }
   return NeuronStatus::OK();
+}
+
+// ---------------------------------------------------------------------------
+// Synth model inputs (host-computed per-inference; GQA position machinery)
+// ---------------------------------------------------------------------------
+NeuronStatus ModelBuilder::AddSynthModelInput(
+    const std::string& name,
+    const neuron::wrapper::OperandType& operand_type,
+    neuron::wrapper::Model::SynthInput::Kind kind,
+    uint32_t& index) {
+  if (Contains(operands_, name)) {
+    index = operand_indices_.at(name);
+    return NeuronStatus::OK();
+  }
+  NEURON_RETURN_IF_ERROR(AddNewOperand(name, operand_type, index));
+  input_index_vec_.push_back(index);
+  neuron_model_->AddInput(name, operand_type);
+  neuron_model_->synth_inputs_.push_back(
+      {name, kind, operand_type.GetOperandBlobByteSize()});
+  LOGS_NEURON(VERBOSE) << "Added synth model input [" << name << "] kind " << kind;
+  return NeuronStatus::OK();
+}
+
+void ModelBuilder::SetSynthRotaryTables(std::vector<float> cos_rows,
+                                        std::vector<float> sin_rows, uint32_t half) {
+  if (!neuron_model_->rotary_cos_.empty()) return;
+  neuron_model_->rotary_cos_ = std::move(cos_rows);
+  neuron_model_->rotary_sin_ = std::move(sin_rows);
+  neuron_model_->rotary_half_ = half;
+}
+
+void ModelBuilder::SetSynthSeqlensName(const std::string& name) {
+  if (neuron_model_->seqlens_input_name_.empty()) neuron_model_->seqlens_input_name_ = name;
 }
 
 // ---------------------------------------------------------------------------

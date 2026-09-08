@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
@@ -111,6 +112,7 @@ struct NeuronComputeState {
   struct InputInfo {
     size_t ort_idx;    // which ORT input slot maps to this model input
     size_t byte_size;  // pre-computed, constant for static shapes
+    int synth_kind{-1};  // wrapper::Model::SynthInput::Kind, or -1 for a real input
   };
   struct OutputInfo {
     size_t ort_idx;
@@ -119,7 +121,51 @@ struct NeuronComputeState {
   };
   std::vector<InputInfo>  input_infos;
   std::vector<OutputInfo> output_infos;
+
+  std::vector<std::vector<uint8_t>> synth_buffers;
+  const neuron::wrapper::Model* model{nullptr};
+  size_t seqlens_ort_idx{SIZE_MAX};
+  int32_t last_synth_pos{-1};  // skip refill when the position has not changed
 };
+
+// Fills one synth buffer for position `pos`.
+// rotary rows round(cos*127) int8, keep/onehot at scale 1 zp 0, mask codes
+// {0, -128}.
+static void FillSynthInput(const neuron::wrapper::Model& model,
+                           neuron::wrapper::Model::SynthInput::Kind kind,
+                           int32_t pos, std::vector<uint8_t>& buf) {
+  using Kind = neuron::wrapper::Model::SynthInput::Kind;
+  int8_t* p = reinterpret_cast<int8_t*>(buf.data());
+  const size_t n = buf.size();
+  switch (kind) {
+    case Kind::kCosRow:
+    case Kind::kSinRow: {
+      const auto& table = (kind == Kind::kCosRow) ? model.GetRotaryCos()
+                                                  : model.GetRotarySin();
+      const uint32_t half = model.GetRotaryHalf();
+      const size_t row = static_cast<size_t>(pos) * half;
+      for (uint32_t i = 0; i < half && i < n; ++i)
+        p[i] = static_cast<int8_t>(std::lround(table[row + i] * 127.0f));
+      break;
+    }
+    case Kind::kKeep:
+      std::memset(p, 1, n);
+      if (static_cast<size_t>(pos) < n) p[pos] = 0;
+      break;
+    case Kind::kOneHot: {
+      std::memset(p, 0, n);
+      const size_t max_seq = model.GetSynthMaxSeq();
+      if (max_seq == 0) break;
+      for (size_t off = pos; off < n; off += max_seq) p[off] = 1;
+      break;
+    }
+    case Kind::kMask:
+      std::memset(p, 0, std::min(n, static_cast<size_t>(pos) + 1));
+      if (static_cast<size_t>(pos) + 1 < n)
+        std::memset(p + pos + 1, 0x80, n - pos - 1);
+      break;
+  }
+}
 
 // ============================================================================
 // NeuronNodeComputeInfo
@@ -164,12 +210,36 @@ struct NeuronNodeComputeInfo : OrtNodeComputeInfo {
     }
 
     // Pre-build input metadata.
+    // Synth inputs (host-computed GQA position) have no ORT slot: 
+    // they get a state-owned buffer instead.
     const auto& model_inputs = model->GetInputs();
     cs->input_infos.resize(model_inputs.size());
+    cs->synth_buffers.resize(model_inputs.size());
+    cs->model = model;
     for (size_t i = 0; i < model_inputs.size(); ++i) {
       const auto& name = model_inputs[i];
-      cs->input_infos[i].ort_idx   = model->GetMappedInputIdx(name);
-      cs->input_infos[i].byte_size = model->GetInputType(name).GetOperandBlobByteSize();
+      auto& info = cs->input_infos[i];
+      info.byte_size = model->GetInputType(name).GetOperandBlobByteSize();
+      bool synth = false;
+      for (const auto& si : model->GetSynthInputs()) {
+        if (si.name == name) {
+          info.synth_kind = static_cast<int>(si.kind);
+          info.ort_idx = SIZE_MAX;
+          cs->synth_buffers[i].resize(info.byte_size);
+          synth = true;
+          break;
+        }
+      }
+      if (!synth) info.ort_idx = model->GetMappedInputIdx(name);
+    }
+    if (!model->GetSynthInputs().empty()) {
+      const auto& seqlens = model->GetSeqlensInputName();
+      if (seqlens.empty()) {
+        delete cs;
+        return self->ort_api->CreateStatus(ORT_EP_FAIL,
+            "NeuronEP: synth inputs present but no seqlens input recorded");
+      }
+      cs->seqlens_ort_idx = model->GetMappedInputIdx(seqlens);
     }
 
     // Pre-build output metadata.
@@ -204,12 +274,29 @@ struct NeuronNodeComputeInfo : OrtNodeComputeInfo {
     auto* cs   = static_cast<NeuronComputeState*>(state_ptr);
     Ort::KernelContext ctx(kernel_ctx);
 
+    // Derive the position once, refill on change.
+    if (cs->seqlens_ort_idx != SIZE_MAX) {
+      const int32_t pos = *static_cast<const int32_t*>(
+          ctx.GetInput(cs->seqlens_ort_idx).GetTensorRawData());
+      if (pos != cs->last_synth_pos) {
+        for (size_t i = 0; i < cs->input_infos.size(); ++i) {
+          if (cs->input_infos[i].synth_kind < 0) continue;
+          FillSynthInput(*cs->model,
+                         static_cast<neuron::wrapper::Model::SynthInput::Kind>(
+                             cs->input_infos[i].synth_kind),
+                         pos, cs->synth_buffers[i]);
+        }
+        cs->last_synth_pos = pos;
+      }
+    }
+
     // Set inputs — no allocations, no type queries.
     for (size_t i = 0; i < cs->input_infos.size(); ++i) {
       const auto& info = cs->input_infos[i];
-      auto ort_tensor = ctx.GetInput(info.ort_idx);
-      auto ns = cs->execution->SetInputFast(
-          static_cast<int32_t>(i), ort_tensor.GetTensorRawData(), info.byte_size);
+      const void* buf = (info.synth_kind >= 0)
+                            ? static_cast<const void*>(cs->synth_buffers[i].data())
+                            : ctx.GetInput(info.ort_idx).GetTensorRawData();
+      auto ns = cs->execution->SetInputFast(static_cast<int32_t>(i), buf, info.byte_size);
       if (!ns.IsOK())
         return self->ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
     }

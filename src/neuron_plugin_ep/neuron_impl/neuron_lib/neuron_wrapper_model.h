@@ -71,6 +71,28 @@ class Model {
   const std::vector<std::string>& GetInputs() const;
   const std::vector<std::string>& GetOutputs() const;
 
+  // The GroupQueryAttention lowering needs position-dependent vectors (rotary
+  // rows, KV-write selectors, the causal mask) that nothing on the NPU can
+  // derive from seqlens_k (no GATHER / CAST / int32 compute on MDLA).  The
+  // builder registers them as extra Neuron model inputs; ComputeImpl fills
+  // them on the host each inference from the seqlens_k value.
+  struct SynthInput {
+    enum Kind { kCosRow, kSinRow, kKeep, kOneHot, kMask };
+    std::string name;
+    Kind kind;
+    size_t byte_size;
+  };
+  const std::vector<SynthInput>& GetSynthInputs() const { return synth_inputs_; }
+  // fp32 rotary tables, rows [0, rows), row length `half`, sliced from the
+  // model's cos_cache/sin_cache by the builder.
+  const std::vector<float>& GetRotaryCos() const { return rotary_cos_; }
+  const std::vector<float>& GetRotarySin() const { return rotary_sin_; }
+  uint32_t GetRotaryHalf() const { return rotary_half_; }
+  size_t GetSynthMaxSeq() const {
+    return rotary_half_ ? rotary_cos_.size() / rotary_half_ : 0;
+  }
+  const std::string& GetSeqlensInputName() const { return seqlens_input_name_; }
+
   const neuron::wrapper::OperandType& GetInputType(const std::string& name) const;
   neuron::wrapper::OperandType GetOutputType(const std::string& name,
                                               const Execution& execution) const;
@@ -111,6 +133,12 @@ class Model {
 
   std::unordered_map<std::string, size_t> input_map_;
   std::unordered_map<std::string, size_t> output_map_;
+
+  // Synth-input metadata (see SynthInput above); set by ModelBuilder.
+  std::vector<SynthInput> synth_inputs_;
+  std::vector<float> rotary_cos_, rotary_sin_;
+  uint32_t rotary_half_{0};
+  std::string seqlens_input_name_;
   std::unordered_map<std::string, std::string> onnx_to_neuron_output_map_;
 
   std::mutex mutex_;
