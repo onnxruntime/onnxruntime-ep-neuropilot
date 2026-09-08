@@ -103,7 +103,14 @@ int32_t NeuronGraphContext::GetElementType(const std::string& name) const {
 // ---------------------------------------------------------------------------
 bool NeuronGraphContext::HasStaticShape(const std::string& name) const {
   const Shape s = GetShape(name);
-  if (s.empty()) return false;
+  if (s.empty()) {
+    // GetShape returns {} both for a rank-0 scalar and for a tensor whose shape
+    // is unknown.  A declared scalar is static; only the unknown case is not.
+    const auto* vi = GetValueInfo(name);
+    return vi && vi->has_type() && vi->type().has_tensor_type() &&
+           vi->type().tensor_type().has_shape() &&
+           vi->type().tensor_type().shape().dim_size() == 0;
+  }
   for (auto d : s) {
     if (d == 0) return false;
   }
