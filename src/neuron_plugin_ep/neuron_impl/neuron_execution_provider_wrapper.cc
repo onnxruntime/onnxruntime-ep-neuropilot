@@ -413,6 +413,27 @@ static std::vector<std::vector<int>> FindSupportedGroups(
       continue;
     }
 
+    // MDLA rejects any operand dimension above 65535.
+    {
+      constexpr uint32_t kMaxNeuronDim = 65535;
+      auto oversized = [&](const std::string& name) {
+        for (const uint32_t d : ctx.GetShape(name))
+          if (d > kMaxNeuronDim) return true;
+        return false;
+      };
+      bool bad_dim = false;
+      for (const auto& inp : node.input())
+        if (!inp.empty() && !ctx.IsInitializer(inp) && oversized(inp)) { bad_dim = true; break; }
+      for (const auto& out : node.output())
+        if (!bad_dim && !out.empty() && oversized(out)) bad_dim = true;
+      if (bad_dim) {
+        LOGS_NEURON(INFO) << "Node [" << node.name() << "] op_type [" << op
+                          << "]: an activation dimension exceeds MDLA's "
+                          << kMaxNeuronDim << " limit; running on CPU.";
+        continue;
+      }
+    }
+
     // Find this node's QDQ group (for the own-DQ INT64 allowance).
     const QDQNodeGroup* qdq = nullptr;
     for (const auto& out : node.output()) {
