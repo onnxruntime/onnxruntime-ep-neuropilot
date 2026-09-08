@@ -79,6 +79,7 @@ static OpBuilderRegistrations CreateOpBuilderRegistrations() {
     CreateMatMulOpBuilder("MatMul", op_registrations);
     CreateMatMulOpBuilder("QLinearMatMul", op_registrations);
     CreateMatMulNBitsOpBuilder("MatMulNBits", op_registrations);  // MatMulNBits (com.microsoft)
+    CreateGroupQueryAttentionOpBuilder("GroupQueryAttention", op_registrations);  // com.microsoft
   }
   
 

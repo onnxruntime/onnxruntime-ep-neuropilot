@@ -354,9 +354,23 @@ void DetectQDQGroups(
       if (any_unabsorbed_dq) continue;
     }
 
+    // GroupQueryAttention is lowered by a decomposing builder that emits its own
+    // DEQUANTIZE/QUANTIZE around the float side inputs (rotary caches, KV cache)
+    // and consumes the integer ones (seqlens_k) outside the quantized domain, so
+    // the mixed-operand rule below does not apply to it.  What it does require is
+    // INT8 query/key/value and a quantized output.
+    const bool is_gqa = node.op_type() == "GroupQueryAttention";
+    if (is_gqa) {
+      constexpr int kNumQuantizedInputs = 3;  // query, key, value
+      bool qkv_quantized = node.input_size() >= kNumQuantizedInputs;
+      for (int j = 0; j < kNumQuantizedInputs && qkv_quantized; ++j)
+        qkv_quantized = group.input_quant_params[static_cast<size_t>(j)].has_value();
+      if (!qkv_quantized || !group.output_quant_params.has_value()) continue;
+    }
+
     // Reject if DQ-absorbed inputs would be mixed with non-DQ float inputs
     // (incl. float initializers), which Neuron equally rejects.
-    if (found_dq) {
+    if (found_dq && !is_gqa) {
       bool any_non_dq_activation = false;
       for (int j = 0; j < node.input_size() && !any_non_dq_activation; ++j) {
         const auto& inp = node.input(j);

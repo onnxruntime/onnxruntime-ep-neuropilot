@@ -52,6 +52,7 @@ void CreateConvOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_
 void CreateGemmOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations);
 void CreateMatMulOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations);
 void CreateMatMulNBitsOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations);  // MatMulNBits
+void CreateGroupQueryAttentionOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations);  // GroupQueryAttention (com.microsoft)
 void CreateSkipSimplifiedLayerNormOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations);
 void CreatePoolOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations);
 void CreateMinMaxOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations);
