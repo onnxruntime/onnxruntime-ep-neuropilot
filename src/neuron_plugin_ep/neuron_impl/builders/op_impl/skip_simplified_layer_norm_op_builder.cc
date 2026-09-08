@@ -202,9 +202,14 @@ NeuronStatus SkipSimplifiedLayerNormOpBuilder::AddToModelBuilderImpl(
   const std::string eps_const_name =
       model_builder.GetUniqueName(node.name() + "_rms_eps");
   {
+    // The operand is [tokens, 1]: materialise a full column.  Passing &eps
+    // here made the persist-buffer copy read tokens*4 bytes from a single
+    // stack float, every row but the first got garbage added to its
+    // mean-square.
+    const std::vector<float> eps_column(flat_tokens, eps);
     const OperandType eps_type(Type::TENSOR_FLOAT32, mean_sq_shape);
     NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(
-        eps_const_name, &eps, eps_type));
+        eps_const_name, eps_column.data(), eps_type));
   }
 
   const std::string mean_sq_eps_name =
