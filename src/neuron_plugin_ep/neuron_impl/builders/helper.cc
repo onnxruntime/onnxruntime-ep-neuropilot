@@ -319,6 +319,13 @@ bool GetShape(const NeuronGraphContext& ctx, const std::string& name, Shape& sha
   shape.clear();
   const auto* tensor_info = ctx.GetValueInfo(name);
   if (!tensor_info) {
+    // Initializers carry their shape in the tensor proto, and the capability
+    // probe's extracted subgraph has no value_info for them (only the full
+    // ORT-provided graph does).
+    if (const auto* init = ctx.GetInitializer(name)) {
+      for (const auto dim : init->dims()) shape.push_back(static_cast<uint32_t>(dim));
+      return true;
+    }
     LOGS_NEURON(WARNING) << "Name [" << name << "] has no shape info";
     return false;
   }
