@@ -12,11 +12,6 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 # Prevent protobuf FetchContent from building an aarch64 protoc that can't
-# run on the x86 host.  The host protoc (PROTOC_BIN) is used for codegen.
+# run on the x86 host.  A version-matched HOST protoc is built separately by
+# the top-level CMakeLists.txt (see its CMAKE_CROSSCOMPILING block).
 set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE BOOL "" FORCE)
-
-# Tell protobuf_generate (used by ONNX FetchContent) to use the host protoc.
-if(NOT DEFINED PROTOBUF_PROTOC_EXECUTABLE)
-  find_program(PROTOBUF_PROTOC_EXECUTABLE protoc
-    NO_CMAKE_FIND_ROOT_PATH)
-endif()

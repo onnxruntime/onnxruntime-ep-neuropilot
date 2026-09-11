@@ -46,15 +46,14 @@ cmake -S . -B build \
 cmake --build build -j
 ```
 
-Cross-compiling — add the toolchain file for the target, plus a **host**
-protoc (a target-architecture protoc cannot run on the build machine):
+Cross-compiling — add the toolchain file for the target. Codegen needs a
+**host** protoc (a target-architecture one cannot run on the build machine); it is resolved
+automatically.
 
 ```bash
 # aarch64 Linux
 cmake -S . -B build-aarch64 -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64.cmake \
-  -DPROTOBUF_PROTOC_EXECUTABLE=$(command -v protoc) \
-  -DONNX_CUSTOM_PROTOC_EXECUTABLE=$(command -v protoc) \
   -DORT_INCLUDE_DIR=... -DNEURON_OP_CAPABILITY_LIB_DIR=...
 
 # Android
@@ -62,13 +61,13 @@ cmake -S . -B build-android -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-android.cmake \
   -DANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/27.2.12479018 \
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
-  -DPROTOBUF_PROTOC_EXECUTABLE=$(command -v protoc) \
-  -DONNX_CUSTOM_PROTOC_EXECUTABLE=$(command -v protoc) \
   -DORT_INCLUDE_DIR=... -DNEURON_OP_CAPABILITY_LIB_DIR=...
 ```
 
-> The host protoc must be **21.12**, matching the FetchContent protobuf pin. Distro protoc
-> 3.12 (Ubuntu 22.04) generates `.pb.h` files the 3.21.12 headers reject.
+A `protoc` on `PATH` is used when it is exactly the version of the
+protobuf runtime this library links — otherwise a matching host protoc is built from source.
+Pin a specific one with `-DPROTOBUF_PROTOC_EXECUTABLE=/path/to/protoc`; a version mismatch
+will result in an error.
 
 Key CMake options:
 

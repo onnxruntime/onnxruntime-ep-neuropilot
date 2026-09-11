@@ -58,10 +58,6 @@ include("${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake")
 
 # --- protoc, exactly as in toolchain-aarch64.cmake --------------------------
 # Never build a target-architecture protoc: it cannot run on the x86 build host.
-# ONNX's codegen uses the HOST protoc found below.
+# A version-matched HOST protoc is provided separately by the top-level
+# CMakeLists.txt (see its CMAKE_CROSSCOMPILING block).
 set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE BOOL "" FORCE)
-
-if(NOT DEFINED PROTOBUF_PROTOC_EXECUTABLE)
-  find_program(PROTOBUF_PROTOC_EXECUTABLE protoc
-    NO_CMAKE_FIND_ROOT_PATH)
-endif()

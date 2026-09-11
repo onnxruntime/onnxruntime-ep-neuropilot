@@ -151,6 +151,7 @@ if(WIN32)
 endif()
 set(protobuf_BUILD_TESTS      OFF CACHE INTERNAL "")
 set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE INTERNAL "")
+set(PROTOBUF_EXPECTED_VERSION "3.21.12")   # == the v21.12 tag below
 FetchContent_Declare(protobuf
   GIT_REPOSITORY https://github.com/protocolbuffers/protobuf.git
   GIT_TAG        v21.12
@@ -161,17 +162,77 @@ FetchContent_MakeAvailable(protobuf)
 # to the host binary.  ONNX's cmake uses $<TARGET_FILE:protobuf::protoc> in
 # add_custom_command, so the target must exist even though we don't build an
 # aarch64 protoc (protobuf_BUILD_PROTOC_BINARIES=OFF in toolchain).
+#
+# protoc is a build-time code generator, not a link-time dependency, but the
+# generated sources must compile against the runtime we link: a protoc from
+# protobuf >= 26 emits .pb.h files that #include
+# "google/protobuf/runtime_version.h", a header that does not exist in 21.12.
+# So a host protoc is usable only if its version matches exactly; otherwise one
+# is built for the HOST from the same protobuf tree FetchContent checked out.
 if(CMAKE_CROSSCOMPILING AND NOT TARGET protobuf::protoc)
-  if(NOT PROTOBUF_PROTOC_EXECUTABLE)
-    find_program(PROTOBUF_PROTOC_EXECUTABLE protoc NO_CMAKE_FIND_ROOT_PATH)
+  # -DPROTOBUF_PROTOC_EXECUTABLE pins one explicitly, and a mismatch is then an
+  # error instead of a silent source build. Otherwise take it from PATH: the
+  # toolchain sets CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER, but be explicit that
+  # this has to run on the BUILD machine. NO_CACHE keeps the search result out
+  # of the cache, where it would look like an explicit pin on the next configure.
+  set(_protoc_pinned "${PROTOBUF_PROTOC_EXECUTABLE}")
+  if(NOT _protoc_pinned)
+    find_program(PROTOBUF_PROTOC_EXECUTABLE protoc NO_CMAKE_FIND_ROOT_PATH NO_CACHE)
   endif()
-  if(NOT PROTOBUF_PROTOC_EXECUTABLE)
-    message(FATAL_ERROR "Host protoc not found. Install protobuf-compiler.")
+
+  set(_protoc_id "no usable protoc found")
+  set(_protoc_version "")
+  if(PROTOBUF_PROTOC_EXECUTABLE)
+    execute_process(
+      COMMAND "${PROTOBUF_PROTOC_EXECUTABLE}" --version
+      OUTPUT_VARIABLE _protoc_out
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(_protoc_out MATCHES "libprotoc ([0-9]+(\\.[0-9]+)+)")
+      set(_protoc_version "${CMAKE_MATCH_1}")
+      set(_protoc_id
+          "libprotoc ${_protoc_version} at ${PROTOBUF_PROTOC_EXECUTABLE}")
+    endif()
   endif()
+
+  if(_protoc_version VERSION_EQUAL PROTOBUF_EXPECTED_VERSION)
+    message(STATUS "Cross-compile: using host ${_protoc_id}")
+  elseif(_protoc_pinned)
+    message(FATAL_ERROR
+      "PROTOBUF_PROTOC_EXECUTABLE is ${_protoc_id}: expected libprotoc "
+      "${PROTOBUF_EXPECTED_VERSION} to match the linked protobuf runtime.\n"
+      "  Unset it to build a matching host protoc from source.")
+  else()
+    message(STATUS "Cross-compile: building host protoc "
+      "${PROTOBUF_EXPECTED_VERSION} from source (${_protoc_id})")
+
+    include(ExternalProject)
+    find_program(HOST_C_COMPILER   NAMES gcc cc  NO_CMAKE_FIND_ROOT_PATH REQUIRED)
+    find_program(HOST_CXX_COMPILER NAMES g++ c++ NO_CMAKE_FIND_ROOT_PATH REQUIRED)
+
+    set(PROTOBUF_PROTOC_EXECUTABLE "${CMAKE_BINARY_DIR}/host-protoc/protoc")
+    ExternalProject_Add(host_protoc
+      SOURCE_DIR       "${protobuf_SOURCE_DIR}"
+      BINARY_DIR       "${CMAKE_BINARY_DIR}/host-protoc"
+      DOWNLOAD_COMMAND ""
+      INSTALL_COMMAND  ""   # only the binary is needed, used from the build dir
+      CMAKE_ARGS
+        # Deliberately NOT passing CMAKE_TOOLCHAIN_FILE: this is a host build.
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_C_COMPILER=${HOST_C_COMPILER}
+        -DCMAKE_CXX_COMPILER=${HOST_CXX_COMPILER}
+        -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER}
+        -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
+        -Dprotobuf_BUILD_PROTOC_BINARIES=ON
+        -Dprotobuf_BUILD_TESTS=OFF
+        -Dprotobuf_WITH_ZLIB=OFF
+      BUILD_BYPRODUCTS    "${PROTOBUF_PROTOC_EXECUTABLE}"
+      USES_TERMINAL_BUILD TRUE)
+  endif()
+
   add_executable(protobuf::protoc IMPORTED GLOBAL)
   set_target_properties(protobuf::protoc PROPERTIES
     IMPORTED_LOCATION "${PROTOBUF_PROTOC_EXECUTABLE}")
-  message(STATUS "Cross-compile: protobuf::protoc → ${PROTOBUF_PROTOC_EXECUTABLE}")
 endif()
 
 # --- ONNX ---
@@ -188,6 +249,14 @@ FetchContent_Declare(onnx
   GIT_TAG        e709452ef2bbc1d113faf678c24e6d3467696e83  # v1.18.0
 )
 FetchContent_MakeAvailable(onnx)
+
+# ONNX's codegen custom commands reference protobuf::protoc by path, so they
+# need an explicit ordering dependency on the host protoc ExternalProject.
+if(TARGET host_protoc)
+  foreach(_gen IN ITEMS gen_onnx_proto gen_onnx_operators_proto gen_onnx_data_proto)
+    add_dependencies(${_gen} host_protoc)
+  endforeach()
+endif()
 
 FetchContent_GetProperties(onnx SOURCE_DIR ONNX_SRC_DIR)
 message(STATUS "ONNX sources      : ${ONNX_SRC_DIR}")
