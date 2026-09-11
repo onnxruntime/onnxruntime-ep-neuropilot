@@ -15,3 +15,8 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 # run on the x86 host.  A version-matched HOST protoc is built separately by
 # the top-level CMakeLists.txt (see its CMAKE_CROSSCOMPILING block).
 set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE BOOL "" FORCE)
+
+# Host zlib (/usr/include + /usr/lib/libz.so) must never leak into the
+# aarch64 build: it injects `-isystem /usr/include`, which makes the cross
+# compiler use host glibc headers (__WORDSIZE=32 -> 32-bit uintptr_t).
+set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
