@@ -302,6 +302,9 @@ target_compile_definitions(onnxruntime_providers_neuron PRIVATE
   ONNX_NAMESPACE=onnx
   ONNX_ML=1
   NOMINMAX
+  # Release version of this EP, reported to ORT via OrtEpFactory::GetVersion.
+  # Defined by CMake via project(... VERSION ...) above.
+  ORT_NEURON_EP_VERSION="${PROJECT_VERSION}"
   # Set to 0 to enable VERBOSE logs (LOGS_NEURON(VERBOSE) calls).
   # Remove or set to 1 for INFO-and-above only in production.
   NEURON_LOG_MIN_SEVERITY=0

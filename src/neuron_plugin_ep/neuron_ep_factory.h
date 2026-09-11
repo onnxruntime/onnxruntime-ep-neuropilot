@@ -88,7 +88,9 @@ class NeuronEpFactory : public OrtEpFactory, public ApiPtrs {
   // Vendor ID 0x0E8D is MediaTek's PCI vendor ID.
   const std::string vendor_{"MediaTek"};
   const uint32_t    vendor_id_{0x0E8D};
-  const std::string ep_version_{"1.26.0"};
+  // Release version of this EP (NOT the ORT version). Defined by CMake from
+  // project(ORTNeuronEp VERSION ...)
+  const std::string ep_version_{ORT_NEURON_EP_VERSION};
 
   // CPU memory info: Neuron EP uses CPU-accessible memory.
   // The NPU acceleration is internal to the Neuron SDK.
