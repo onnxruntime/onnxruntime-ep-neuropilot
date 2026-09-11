@@ -633,8 +633,11 @@ static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
 //   with neighbouring supported ops whenever doing so stays convex — a chain
 //   of quantized layers becomes ONE Neuron model instead of N.
 // ============================================================================
+//
+// graph_proto is non-const: CapabilityGraphHandle strips tensor payloads in
+// place and restores them before returning.
 static std::vector<std::vector<int>> FindSupportedGroups(
-    const onnx::GraphProto& graph_proto,
+    onnx::GraphProto& graph_proto,
     const NeuronWrapperState* state) {
 
   using namespace onnxruntime::neuron;
@@ -656,7 +659,9 @@ static std::vector<std::vector<int>> FindSupportedGroups(
   check_params.use_fp16 = (state->neuron_flags & NEURON_FLAG_USE_FP16) != 0;
 
   // One capability-library copy of the graph per partitioning pass, not per
-  // node. The handle must outlive every IsOpSupported call below.
+  // node. The handle must outlive every IsOpSupported call below. The payload
+  // elision only mutates fields inside existing TensorProtos, so ctx's
+  // initializer pointers stay valid.
   op_capability::CapabilityGraphHandle cap_graph(graph_proto);
   if (!cap_graph.valid()) {
     LOGS_NEURON(ERROR) << "Could not hand the graph to the op capability library; "

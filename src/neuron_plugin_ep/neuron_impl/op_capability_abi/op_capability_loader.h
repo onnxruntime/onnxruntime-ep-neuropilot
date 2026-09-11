@@ -62,14 +62,17 @@ class OpCapabilityLoader {
 };
 
 // RAII wrapper around a NeuronCapGraph. Serializes a GraphProto and hands the
-// bytes to the library, which parses them with its own protobuf. valid() is
-// false if the library is not loaded or the graph could not be parsed.
+// bytes to the library, which parses them with its own protobuf. Bulk tensor
+// payloads are stripped before serializing and restored afterwards (see
+// graph_payload_elision.h) -- hence the non-const reference; the graph is
+// unchanged by the time the constructor returns. valid() is false if the
+// library is not loaded or the graph could not be parsed.
 class CapabilityGraphHandle {
  public:
   CapabilityGraphHandle() = default;
 
   // Serializes `graph` and creates the library-side handle.
-  explicit CapabilityGraphHandle(const onnx::GraphProto& graph);
+  explicit CapabilityGraphHandle(onnx::GraphProto& graph);
 
   ~CapabilityGraphHandle();
 

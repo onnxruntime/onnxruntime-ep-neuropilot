@@ -411,6 +411,39 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # ---------------------------------------------------------------------------
+# Tests (host-only; sources live in test/ to stay out of the EP's GLOB_RECURSE)
+# ---------------------------------------------------------------------------
+include(CTest)
+
+if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
+  add_executable(graph_payload_elision_test
+    "${PROJECT_SOURCE_DIR}/test/graph_payload_elision_test.cc"
+    "${NEURON_IMPL_DIR}/neuron_impl/op_capability_abi/graph_payload_elision.cc"
+  )
+
+  target_compile_definitions(graph_payload_elision_test PRIVATE
+    ONNX_NAMESPACE=onnx
+    ONNX_ML=1
+  )
+
+  target_include_directories(graph_payload_elision_test PRIVATE
+    "${NEURON_IMPL_DIR}/neuron_impl"
+    "${ONNX_SRC_DIR}"
+  )
+
+  target_link_libraries(graph_payload_elision_test PRIVATE
+    protobuf::libprotobuf
+    onnx
+  )
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(graph_payload_elision_test PRIVATE -Wall -Wextra)
+  endif()
+
+  add_test(NAME graph_payload_elision COMMAND graph_payload_elision_test)
+endif()
+
+# ---------------------------------------------------------------------------
 # Required library: libneuron_op_capability.so
 #
 # The per-op IsOpSupported logic ships as a prebuilt closed-source library.

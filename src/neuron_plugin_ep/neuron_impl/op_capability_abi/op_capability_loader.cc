@@ -10,6 +10,7 @@
 #include <onnx/onnx_pb.h>
 
 #include "../neuron_types_internal.h"
+#include "graph_payload_elision.h"
 
 namespace onnxruntime {
 namespace neuron {
@@ -126,15 +127,24 @@ int32_t OpCapabilityLoader::IsNodeSupported(NeuronCapGraph* graph,
 // CapabilityGraphHandle
 // ---------------------------------------------------------------------------
 
-CapabilityGraphHandle::CapabilityGraphHandle(const onnx::GraphProto& graph) {
+CapabilityGraphHandle::CapabilityGraphHandle(onnx::GraphProto& graph) {
   const auto& loader = OpCapabilityLoader::Instance();
   if (!loader.IsLoaded()) return;
 
   std::string bytes;
-  if (!graph.SerializeToString(&bytes)) {
-    // Realistically only happens on a graph exceeding protobuf's 2 GiB limit.
-    LOGS_NEURON(ERROR) << "Failed to serialize GraphProto for the op capability library.";
-    return;
+  {
+    // Strip bulk payloads for the duration of the serialize only.
+    const ElidedInitializerPayloads elided(graph);
+
+    if (!graph.SerializeToString(&bytes)) {
+      LOGS_NEURON(ERROR) << "Failed to serialize GraphProto for the op capability library.";
+      return;
+    }
+
+    LOGS_NEURON(VERBOSE) << "Serialized graph for the op capability library: "
+                         << bytes.size() << " bytes, with " << elided.elided_count()
+                         << " tensor payload(s) totalling " << elided.elided_bytes()
+                         << " bytes elided.";
   }
 
   handle_ = loader.CreateGraph(bytes.data(), bytes.size());

@@ -170,6 +170,11 @@ class NeuronGraphContext {
 
   // ---- Initializer data access helpers ------------------------------------
 
+  // True if the tensor's payload was stripped before crossing the op capability
+  // ABI (see neuron_op_capability_abi.h). The Get*Data helpers below return an
+  // error for such a tensor.
+  static bool IsElidedInitializer(const onnx::TensorProto& tensor);
+
   // Read all float values from a TensorProto (handles raw_data and float_data).
   static NeuronStatus GetFloatData(const onnx::TensorProto& tensor,
                                    std::vector<float>& out);

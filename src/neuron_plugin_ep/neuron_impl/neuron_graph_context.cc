@@ -8,6 +8,7 @@
 #include <numeric>  // iota
 
 #include "builders/neuron_qdq_support.h"
+#include "op_capability_abi/graph_payload_elision.h"
 
 namespace onnxruntime {
 namespace neuron {
@@ -175,11 +176,24 @@ std::vector<float> NeuronGraphContext::GetAttrFloats(
 }
 
 // ---------------------------------------------------------------------------
+// IsElidedInitializer
+// ---------------------------------------------------------------------------
+/*static*/
+bool NeuronGraphContext::IsElidedInitializer(const onnx::TensorProto& tensor) {
+  return op_capability::IsElidedPayload(tensor);
+}
+
+// ---------------------------------------------------------------------------
 // GetFloatData
 // ---------------------------------------------------------------------------
 /*static*/
 NeuronStatus NeuronGraphContext::GetFloatData(const onnx::TensorProto& tensor,
                                                std::vector<float>& out) {
+  if (IsElidedInitializer(tensor)) {
+    return NeuronStatus{false,
+                        "GetFloatData: tensor '" + tensor.name() +
+                            "' was elided at the op capability ABI boundary"};
+  }
   if (tensor.data_type() != onnx::TensorProto::FLOAT) {
     return NeuronStatus{false, "GetFloatData: tensor is not FLOAT type"};
   }
@@ -200,6 +214,11 @@ NeuronStatus NeuronGraphContext::GetFloatData(const onnx::TensorProto& tensor,
 /*static*/
 NeuronStatus NeuronGraphContext::GetInt32Data(const onnx::TensorProto& tensor,
                                                std::vector<int32_t>& out) {
+  if (IsElidedInitializer(tensor)) {
+    return NeuronStatus{false,
+                        "GetInt32Data: tensor '" + tensor.name() +
+                            "' was elided at the op capability ABI boundary"};
+  }
   if (tensor.data_type() != onnx::TensorProto::INT32) {
     return NeuronStatus{false, "GetInt32Data: tensor is not INT32 type"};
   }
@@ -220,6 +239,11 @@ NeuronStatus NeuronGraphContext::GetInt32Data(const onnx::TensorProto& tensor,
 /*static*/
 NeuronStatus NeuronGraphContext::GetInt64Data(const onnx::TensorProto& tensor,
                                                std::vector<int64_t>& out) {
+  if (IsElidedInitializer(tensor)) {
+    return NeuronStatus{false,
+                        "GetInt64Data: tensor '" + tensor.name() +
+                            "' was elided at the op capability ABI boundary"};
+  }
   if (tensor.data_type() != onnx::TensorProto::INT64) {
     return NeuronStatus{false, "GetInt64Data: tensor is not INT64 type"};
   }

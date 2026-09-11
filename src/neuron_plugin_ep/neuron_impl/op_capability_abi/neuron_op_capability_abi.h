@@ -10,6 +10,16 @@
  * C linkage; no ownership, no exceptions, and no C++ types cross the boundary.
  * Cost: one serialize+parse per GetCapability() call -- not per node.
  *
+ * PAYLOAD: every TensorProto whose inline data exceeds
+ * NEURON_CAP_MAX_INLINE_INITIALIZER_BYTES has that data removed. Such a tensor
+ * keeps its name, data_type and dims, and is marked external with
+ * external_data { key: "location", value: NEURON_CAP_ELIDED_LOCATION }. This
+ * applies to initializers, sparse initializers and tensor-valued attributes,
+ * including inside subgraphs; string_data is never elided. It keeps the
+ * serialized copy independent of the model's weight size and inside protobuf's
+ * 2 GiB serialization limit. NeuronGraphContext::GetFloatData and friends
+ * return an error for a marked tensor rather than an empty result.
+ *
  * VERSIONING: bump NEURON_CAP_ABI_VERSION for ANY change to the signatures,
  * structs, or semantics below. The EP checks it for exact equality at load time
  * and refuses a mismatched library. NeuronCapParams::struct_size is a second
@@ -31,6 +41,18 @@ extern "C" {
 
 /* Name the EP passes to dlopen(). */
 #define NEURON_CAP_LIBRARY_NAME "libneuron_op_capability.so"
+
+/*
+ * Per-TensorProto inline-payload budget for the serialized graph. See PAYLOAD
+ * above.
+ */
+#define NEURON_CAP_MAX_INLINE_INITIALIZER_BYTES 4096u
+
+/*
+ * external_data "location" value marking a tensor whose payload was removed.
+ * Deliberately not a plausible filesystem path.
+ */
+#define NEURON_CAP_ELIDED_LOCATION "_NEURON_CAP_ELIDED_"
 
 /*
  * Export marker for the entry points below. The library is built with
@@ -91,8 +113,9 @@ typedef struct NeuronCapParams {
 NEURON_CAP_API uint32_t NeuronCapGetAbiVersion(void);
 
 /*
- * Parses a serialized onnx::GraphProto. The data is copied; the caller may free
- * it on return. Returns NULL on malformed input (treated as untrusted). Every
+ * Parses a serialized onnx::GraphProto (bulk tensor payloads elided as
+ * described under PAYLOAD above). The data is copied; the caller may free it
+ * on return. Returns NULL on malformed input (treated as untrusted). Every
  * returned handle must be released with NeuronCapReleaseGraph.
  */
 NEURON_CAP_API NeuronCapGraph* NeuronCapCreateGraph(const void* bytes, size_t length);
