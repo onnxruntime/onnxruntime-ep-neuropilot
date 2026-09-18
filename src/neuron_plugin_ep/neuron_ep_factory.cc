@@ -203,6 +203,8 @@ OrtStatus* ORT_API_CALL NeuronEpFactory::CreateEpImpl(
         "NEURON_FLAG_OPTIMIZATION_STRING",
         "NEURON_FLAG_FORCE_SKIP_OPS_STRING",
         "NEURON_FLAG_SKIP_CAPABILITY_PROBE",
+        "NEURON_FLAG_MAX_PARTITION_BYTES",
+        "NEURON_FLAG_PARTITION_COUNT",
     };
     std::string config_val;
     for (const char* flag : kNeuronFlags) {

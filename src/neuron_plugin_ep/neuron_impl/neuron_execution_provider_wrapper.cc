@@ -78,6 +78,18 @@ struct NeuronWrapperState {
   // Provider option flags (copied from OrtKeyValuePairs at Create time).
   uint32_t neuron_flags{0};
   uint32_t min_group_size{1};
+  // NEURON_FLAG_MAX_PARTITION_BYTES: split claimed groups whose constant
+  // initializers exceed this many bytes (0 = unlimited).  MDLA codegen places
+  // all of a network's constants in one contiguous static buffer, and the
+  // Genio 720 driver cannot map one above ~1 GiB (NEURON_UNMAPPABLE; measured:
+  // 960 MiB maps, 1024 MiB does not).  Default: 768 MiB, so a model that fits
+  // one network is untouched and a larger one compiles without any flag; a cut
+  // can only land on a QDQ-unit boundary and may overshoot the budget by one
+  // unit (measured: 896 MiB produced a 904 MiB chunk on llama), hence the margin.
+  uint64_t max_partition_bytes{768ull << 20};
+  // NEURON_FLAG_PARTITION_COUNT: instead of a byte budget, cut each oversized
+  // group into this many chunks balanced by constant bytes (0 = use the budget).
+  uint32_t partition_count{0};
   std::string optimization_string;
   std::unordered_set<std::string> force_skip_ops;
 
@@ -420,6 +432,126 @@ static bool HasSaturatedInt32Bias(const onnx::NodeProto& node,
   for (int32_t v : vals)
     if (v == INT32_MIN || v == INT32_MAX) return true;
   return false;
+}
+
+// ============================================================================
+// SplitGroupsByConstantBytes
+//
+// MDLA codegen emits one contiguous static buffer holding every constant of a
+// network, and the driver refuses to map it above a platform budget (~1 GiB on
+// the Genio 720: NEURON_UNMAPPABLE at NeuronCompilation_finish).  Split any
+// group whose initializers exceed `budget` into consecutive slices of its
+// members.  Members are in topological (proto) order, and a contiguous slice
+// of a convex group is convex: a path a->x->b has idx(a) < idx(x) < idx(b), so
+// x already lay between two members of the parent.  A cut never lands inside a
+// QDQ unit (DQ/target/Q), which would leave a DQ without its target.
+//
+// count == 0: greedy chunks of at most `budget` bytes.  count > 0: an oversized
+// group is cut at the legal boundaries closest to k*total/count, i.e. `count`
+// chunks balanced by constant bytes; `budget` is then only checked and warned.
+// ============================================================================
+static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
+    const onnx::GraphProto& graph_proto,
+    const onnxruntime::neuron::NeuronGraphContext& ctx,
+    std::vector<std::vector<int>> groups,
+    uint64_t budget, uint32_t count) {
+  const int N = graph_proto.node_size();
+
+  // unit_end[i]: highest node index of any QDQ unit containing node i.  A cut
+  // after node j is legal only when every earlier member's unit ends <= j.
+  std::vector<int> unit_end(static_cast<size_t>(N));
+  for (int i = 0; i < N; ++i) unit_end[static_cast<size_t>(i)] = i;
+  for (const auto& kv : ctx.qdq_groups) {
+    const auto& g = kv.second;
+    int end = g.target_node_index;
+    for (int q : g.q_node_indices) end = std::max(end, q);
+    auto bump = [&](int i) {
+      if (i >= 0 && i < N)
+        unit_end[static_cast<size_t>(i)] = std::max(unit_end[static_cast<size_t>(i)], end);
+    };
+    bump(g.target_node_index);
+    for (int d : g.dq_node_indices) bump(d);
+    for (int q : g.q_node_indices) bump(q);
+  }
+
+  // OrtGraphToProto inlines every initializer as raw_data (no handler is
+  // passed), so this is exact even for weights that were external on disk.
+  auto init_bytes = [&](const std::string& name) -> uint64_t {
+    const auto* t = ctx.GetInitializer(name);
+    if (!t) return 0;
+    if (!t->raw_data().empty()) return t->raw_data().size();
+    return 4ull * (t->float_data_size() + t->int32_data_size()) +
+           8ull * (t->int64_data_size() + t->double_data_size() + t->uint64_data_size());
+  };
+  // Bytes node `idx` adds to a chunk that has already seen the tensors in `seen`.
+  auto new_bytes = [&](int idx, const std::unordered_set<std::string>& seen) -> uint64_t {
+    uint64_t b = 0;
+    for (const auto& in : graph_proto.node(idx).input())
+      if (!in.empty() && !seen.count(in)) b += init_bytes(in);
+    return b;
+  };
+  auto mark_seen = [&](int idx, std::unordered_set<std::string>& seen) {
+    for (const auto& in : graph_proto.node(idx).input())
+      if (!in.empty()) seen.insert(in);
+  };
+
+  auto group_bytes = [&](const std::vector<int>& group) {
+    std::unordered_set<std::string> seen;
+    uint64_t total = 0;
+    for (int idx : group) { total += new_bytes(idx, seen); mark_seen(idx, seen); }
+    return total;
+  };
+
+  uint64_t largest = 0;
+  if (count > 0)
+    for (const auto& group : groups) largest = std::max(largest, group_bytes(group));
+
+  std::vector<std::vector<int>> out;
+  for (auto& group : groups) {
+    std::unordered_set<std::string> seen;
+    const uint64_t total = group_bytes(group);
+    if (total <= budget && !(count > 0 && total == largest && total > 0)) {
+      out.push_back(std::move(group));
+      continue;
+    }
+
+    std::vector<int> chunk;
+    uint64_t bytes = 0, done = 0;
+    uint32_t emitted = 0;
+    int pending = -1;
+    seen.clear();
+    auto cut_here = [&](uint64_t next) {
+      if (count == 0) return bytes + next > budget;
+      if (emitted + 1 >= count) return false;
+      const uint64_t target = total * (emitted + 1) / count;
+      return done + bytes >= target || done + bytes + next > target + next / 2;
+    };
+    auto emit = [&](const char* before) {
+      LOGS_NEURON(INFO) << "Partition chunk " << (emitted + 1) << ": " << chunk.size() << " nodes, "
+                        << (bytes >> 20) << " MiB of constants"
+                        << (before ? std::string(", cut before node [") + before + "]" : "");
+      if (bytes > budget) {
+        LOGS_NEURON(WARNING) << "Partition holds " << (bytes >> 20) << " MiB of constants, above the "
+                             << (budget >> 20) << " MiB per-network budget; it may fail to map";
+      }
+      out.push_back(std::move(chunk));
+      chunk.clear(); seen.clear();
+      done += bytes; bytes = 0; ++emitted;
+    };
+    for (int idx : group) {
+      uint64_t next = new_bytes(idx, seen);
+      if (!chunk.empty() && chunk.back() >= pending && cut_here(next)) {
+        emit(graph_proto.node(idx).name().c_str());
+        next = new_bytes(idx, seen);  // the new chunk has seen nothing yet
+      }
+      bytes += next;
+      mark_seen(idx, seen);
+      chunk.push_back(idx);
+      pending = std::max(pending, unit_end[static_cast<size_t>(idx)]);
+    }
+    if (!chunk.empty()) emit(nullptr);
+  }
+  return out;
 }
 
 // ============================================================================
@@ -804,6 +936,12 @@ static std::vector<std::vector<int>> FindSupportedGroups(
     groups.push_back(std::move(kv.second));
   }
 
+  if (state->max_partition_bytes > 0 || state->partition_count > 0) {
+    groups = SplitGroupsByConstantBytes(
+        graph_proto, ctx, std::move(groups),
+        state->max_partition_bytes > 0 ? state->max_partition_bytes : UINT64_MAX,
+        state->partition_count);
+  }
   return groups;
 }
 
@@ -1007,6 +1145,11 @@ NeuronWrapperHandle NeuronWrapper_Create(
   s->skip_capability_probe = (get("NEURON_FLAG_SKIP_CAPABILITY_PROBE") == "1");
 
   s->optimization_string = get("NEURON_FLAG_OPTIMIZATION_STRING");
+
+  auto max_pb = get("NEURON_FLAG_MAX_PARTITION_BYTES");
+  if (!max_pb.empty()) s->max_partition_bytes = std::stoull(max_pb);
+  auto part_count = get("NEURON_FLAG_PARTITION_COUNT");
+  if (!part_count.empty()) s->partition_count = static_cast<uint32_t>(std::stoul(part_count));
 
   // EPContext (DLA cache) generation.
   s->context_cache_enabled     = get("ep.context_enable") == "1";
