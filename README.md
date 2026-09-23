@@ -21,6 +21,19 @@ library is available from the GitHub release page.
 
 ---
 
+## Target platforms
+
+The same sources build for two targets; the platform-specific code is confined to
+`neuron_impl/neuron_lib/`, behind `__ANDROID__`:
+
+| Target | libc | Toolchain file | Extra link |
+|---|---|---|---|
+| aarch64 Linux | glibc | `cmake/toolchain-aarch64.cmake` | — |
+| Android arm64-v8a | bionic | `cmake/toolchain-android.cmake` | `liblog` (added automatically when `ANDROID`) |
+
+`libneuron_op_capability.so` must be built for the **same platform** — it is loaded into the
+same process. Mixing them fails at `dlopen` time on the device, not at build time.
+
 ## Build
 
 Download the prebuilt `libneuron_op_capability.so` for your target platform from the GitHub
@@ -33,6 +46,30 @@ cmake -S . -B build \
 cmake --build build -j
 ```
 
+Cross-compiling — add the toolchain file for the target, plus a **host**
+protoc (a target-architecture protoc cannot run on the build machine):
+
+```bash
+# aarch64 Linux
+cmake -S . -B build-aarch64 -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64.cmake \
+  -DPROTOBUF_PROTOC_EXECUTABLE=$(command -v protoc) \
+  -DONNX_CUSTOM_PROTOC_EXECUTABLE=$(command -v protoc) \
+  -DORT_INCLUDE_DIR=... -DNEURON_OP_CAPABILITY_LIB_DIR=...
+
+# Android
+cmake -S . -B build-android -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-android.cmake \
+  -DANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/27.2.12479018 \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
+  -DPROTOBUF_PROTOC_EXECUTABLE=$(command -v protoc) \
+  -DONNX_CUSTOM_PROTOC_EXECUTABLE=$(command -v protoc) \
+  -DORT_INCLUDE_DIR=... -DNEURON_OP_CAPABILITY_LIB_DIR=...
+```
+
+> The host protoc must be **21.12**, matching the FetchContent protobuf pin. Distro protoc
+> 3.12 (Ubuntu 22.04) generates `.pb.h` files the 3.21.12 headers reject.
+
 Key CMake options:
 
 | Option | Meaning |
@@ -41,6 +78,7 @@ Key CMake options:
 | `NEURON_OP_CAPABILITY_LIB_DIR` | dir containing the prebuilt `libneuron_op_capability.so` (**required**) |
 | `ORT_LIBRARY_DIR` | optional; enables `--no-undefined` link check |
 | `ORTNeuronEp_INSTALL` | install targets; also stages the `.so` beside the EP (default ON) |
+| `ANDROID_NDK_HOME` / `ANDROID_ABI` / `ANDROID_PLATFORM` | Android only; read by `cmake/toolchain-android.cmake` (defaults `arm64-v8a` / `android-29`) |
 
 If the `.so` is missing, configuration aborts with:
 
@@ -54,7 +92,8 @@ CMake Error: libneuron_op_capability.so is REQUIRED but was not found.
 
 ## Deploy & use
 
-Place both libraries in the same directory (or on the loader's search path):
+Place both libraries — built for the same platform — in the same directory (or on the
+loader's search path):
 
 ```
 libonnxruntime_providers_neuropilot.so
@@ -65,6 +104,18 @@ Register the EP with ORT (`register_execution_provider_library` / the plugin EP 
 init the EP `dlopen`s `libneuron_op_capability.so`; if it is absent, EP creation fails with a
 clear error.
 
+On Android, push both plus an Android `libonnxruntime.so` to the device and set
+`LD_LIBRARY_PATH` to that directory; the EP resolves `libneuron_op_capability.so` **by name**
+through the normal loader search path. Real NPU execution also needs the on-device MediaTek
+Neuron runtime (`libneuronusdk_adapter.mtk.so`).
+
+The NDK builds with `-g`, so the Android `.so` files are tens of MB. Strip before shipping:
+
+```bash
+$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip \
+  --strip-unneeded build-android/libonnxruntime_providers_neuropilot.so
+```
+
 ---
 
 ## Repository Layout
@@ -72,8 +123,10 @@ clear error.
 ```
 onnxruntime-ep-neuropilot/
 ├── CMakeLists.txt                         standalone EP build (FetchContent for protobuf/ONNX/GSL)
-├── Dockerfile / docker-build.sh / docker-entrypoint.sh   aarch64 cross-build
-├── cmake/                                 toolchain + package config
+├── cmake/
+│   ├── toolchain-aarch64.cmake            aarch64 Linux cross-build (glibc, gcc)
+│   ├── toolchain-android.cmake            Android cross-build (bionic, NDK clang)
+│   └── ORTNeuronEpConfig*.cmake.in        package config
 └── src/neuron_plugin_ep/
     ├── neuron_plugin_ep.cc                DLL entry (CreateEpFactories); eagerly loads the .so
     ├── neuron_ep*.{cc,h}                  OrtEp plugin shell
