@@ -6,6 +6,8 @@
 #include <cctype>
 #include <cstring>
 
+#include "onnxruntime_session_options_config_keys.h"
+
 #include "neuron_ep.h"
 #include "neuron_ep_stream_support.h"
 
@@ -208,6 +210,20 @@ OrtStatus* ORT_API_CALL NeuronEpFactory::CreateEpImpl(
           *session_options, (prefix + flag).c_str(), "", config_val));
       if (!config_val.empty())
         f.ort_api.AddKeyValuePair(options, flag, config_val.c_str());
+    }
+
+    // EPContext (DLA cache) options.  These are ORT-wide session config keys,
+    // not per-EP device options, so they carry no "ep.<name>." prefix.
+    static const char* kEpContextKeys[] = {
+        kOrtSessionOptionEpContextEnable,     // "ep.context_enable"
+        kOrtSessionOptionEpContextEmbedMode,  // "ep.context_embed_mode"
+        kOrtSessionOptionEpContextFilePath,   // "ep.context_file_path"
+    };
+    for (const char* key : kEpContextKeys) {
+      RETURN_IF_ERROR(
+          GetSessionConfigEntryOrDefault(*session_options, key, "", config_val));
+      if (!config_val.empty())
+        f.ort_api.AddKeyValuePair(options, key, config_val.c_str());
     }
   }
 

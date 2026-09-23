@@ -1257,8 +1257,7 @@ NeuronStatus ModelBuilder::Compile(std::unique_ptr<wrapper::Model>& model) {
           neuron_model_->compilation_, static_cast<int32_t>(exe_pref_)),
       "setPreference");
 
-  bool is_adapter_dla = GreaterEqualVersion(neuron_version_, {4, 3, 0}) &&
-                        !GreaterEqualVersion(neuron_version_, {7, 0, 0});
+  const bool is_adapter_dla = IsAdapterFormattedDlaVersion(neuron_version_);
   if (store_dla_ && !is_adapter_dla) {
     std::string opt = "--dla-file " + dla_path_.string();
     NEURON_RETURN_STATUS_ON_ERROR_WITH_NOTE(

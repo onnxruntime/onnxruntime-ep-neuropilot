@@ -27,7 +27,10 @@
 #include "../neuron_execution_provider_wrapper.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <filesystem>
+#include <system_error>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -37,11 +40,14 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 #include <onnx/onnx_pb.h>
 
 #include "neuron_graph_context.h"
 #include "builders/helper.h"
 #include "builders/neuron_model_builder.h"
+#include "builders/onnx_ctx_model_helper.h"
 #include "builders/op_builder.h"
 #include "builders/op_builder_factory.h"
 #include "neuron_lib/neuron_implementation.h"
@@ -69,6 +75,11 @@ struct NeuronWrapperState {
   uint32_t min_group_size{1};
   std::string optimization_string;
   std::unordered_set<std::string> force_skip_ops;
+
+  // EPContext (DLA cache) generation.  Mirrors ep.context_* session options.
+  bool        context_cache_enabled{false};
+  bool        context_embed_mode{false};  // ORT's documented default is 0
+  std::string user_context_cache_path;
 
   // NEURON_FLAG_SKIP_CAPABILITY_PROBE; trades CPU fallback for partitioning speed
   bool skip_capability_probe{false};
@@ -887,6 +898,15 @@ NeuronWrapperHandle NeuronWrapper_Create(
 
   s->optimization_string = get("NEURON_FLAG_OPTIMIZATION_STRING");
 
+  // EPContext (DLA cache) generation.
+  s->context_cache_enabled     = get("ep.context_enable") == "1";
+  s->user_context_cache_path   = get("ep.context_file_path");
+  {
+    // ORT documents "0" (sidecar .bin) as the default for ep.context_embed_mode.
+    const std::string embed = get("ep.context_embed_mode");
+    s->context_embed_mode = (embed == "1");
+  }
+
   // Force-skip ops.
   auto skip_str = get("NEURON_FLAG_FORCE_SKIP_OPS_STRING");
   if (!skip_str.empty()) {
@@ -1047,9 +1067,43 @@ OrtStatus* NeuronWrapper_Compile(
     const OrtNode*  const*       fused_nodes,
     size_t                       count,
     OrtNodeComputeInfo**         node_compute_infos,
-    OrtNode**                    /*ep_context_nodes*/) try {
+    OrtNode**                    ep_context_nodes) try {
 
   auto* state = static_cast<NeuronWrapperState*>(handle);
+
+  // Path of the model being compiled; empty when it was loaded from memory.
+  std::string source_model_path;
+  if (count > 0) {
+    const ORTCHAR_T* mp = nullptr;
+    if (ort_api->Graph_GetModelPath(graphs[0], &mp) == nullptr && mp != nullptr)
+      source_model_path = std::filesystem::path(mp).string();
+  }
+  const std::filesystem::path context_model_path =
+      onnxruntime::neuron::GetContextModelPath(state->user_context_cache_path,
+                                               source_model_path);
+
+  // Each partition gets its own DLA and its own EPContext node.  ORT requires a
+  // node for every fused node once generation is enabled, so this must cover
+  // all of them or none.
+  const bool can_store_dla = state->context_cache_enabled && count > 0;
+
+  // Real model I/O per partition, collected as each one compiles.  Used to give
+  // the EPContext node the same inputs/outputs the Neuron model actually has.
+  std::vector<std::string> ctx_partition_names;
+  std::vector<std::vector<std::string>> ctx_input_names, ctx_output_names;
+
+  std::vector<std::filesystem::path> compiled_dla_paths;
+  if (can_store_dla) {
+    static std::atomic<uint64_t> dla_seq{0};
+    const uint64_t batch = dla_seq.fetch_add(1);
+    compiled_dla_paths.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      compiled_dla_paths.push_back(
+          std::filesystem::temp_directory_path() /
+          ("neuron_ep_" + std::to_string(::getpid()) + "_" +
+           std::to_string(batch) + "_" + std::to_string(i) + ".dla"));
+    }
+  }
 
   for (size_t i = 0; i < count; ++i) {
     // Get the fused node name.
@@ -1078,6 +1132,10 @@ OrtStatus* NeuronWrapper_Compile(
 
     builder.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
     builder.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+    if (can_store_dla) {
+      builder.SetStoreDla(true);
+      builder.SetDlaPath(compiled_dla_paths[i]);
+    }
 
     std::unique_ptr<onnxruntime::neuron::wrapper::Model> model;
     NeuronStatus ns = builder.Compile(model);
@@ -1113,12 +1171,34 @@ OrtStatus* NeuronWrapper_Compile(
       model->SetOutputMap(std::move(output_map));
     }
 
+    if (can_store_dla) {
+      ctx_partition_names.push_back(fused_name);
+      ctx_input_names.push_back(model->GetInputs());
+      ctx_output_names.push_back(model->GetOutputs());
+    }
+
     state->neuron_models.emplace(fused_name, std::move(model));
 
     // Allocate OrtNodeComputeInfo.
     auto* nci = new (std::nothrow) NeuronNodeComputeInfo(state, fused_name, ort_api);
     if (!nci) return ort_api->CreateStatus(ORT_EP_FAIL, "NeuronEP: OOM");
     node_compute_infos[i] = nci;
+  }
+
+  // ORT assembles and writes the context model itself; the EP only supplies the
+  // nodes.  ep_context_nodes is null when the session is not generating one.
+  if (can_store_dla && ep_context_nodes != nullptr) {
+    NeuronStatus ns = onnxruntime::neuron::CreateEpContextNodes(
+        *ort_api, *state->model_editor_api, ctx_partition_names,
+        ctx_input_names, ctx_output_names,
+        ep_context_nodes, state->neuron_version, compiled_dla_paths,
+        context_model_path, state->context_embed_mode);
+    for (const auto& p : compiled_dla_paths) {
+      std::error_code ec;
+      std::filesystem::remove(p, ec);
+    }
+    if (!ns.IsOK())
+      return ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
   }
 
   return nullptr;
