@@ -34,10 +34,12 @@ inline constexpr uint16_t ADAPTER_EXTENSION_HINT_OPERATION_TYPE_RESTORE     = 0x
 inline constexpr uint16_t ADAPTER_EXTENSION_HINT_OPERAND_RESTORE_DATA       = 0x0100;
 inline constexpr uint16_t ADAPTER_EXTENSION_HINT_OPERAND_RESTORE_DATA_NO_COPY = 0x0200;
 
-// Returns true when the node is an EPContext node carrying DLA content.
-inline bool IsValidDlaNode(const onnx::NodeProto& node) {
-  return node.op_type() == EP_CONTEXT_OP;
-}
+// Returns true when the node is an EPContext node this EP owns, i.e. it is an
+// EPContext node whose "source" names this EP and which actually carries a
+// cache payload.  Checking "source" matters: a model compiled for several EPs
+// holds one EPContext node per EP, and claiming another EP's node would fail
+// later in the restore with an opaque Neuron error.
+bool IsValidDlaNode(const onnx::NodeProto& node);
 
 // True when `source` names this EP.  Accepts the legacy in-tree Neuron EP names
 // so context models produced before the plugin rename still load.
@@ -59,6 +61,14 @@ bool IsAdapterFormattedDlaNode(const onnx::NodeProto& node);
 
 bool GraphHasDlaNode(const NeuronGraphContext& ctx);
 bool GraphHasAdapterFormattedDlaNode(const NeuronGraphContext& ctx);
+
+// Extracts the DLA blob an EPContext node carries.
+// embed_mode=1: ep_cache_context is the blob itself.
+// embed_mode=0: ep_cache_context is a file name relative to `ep_context_dir`
+//               (the directory holding the context .onnx).
+NeuronStatus GetDlaPayload(const onnx::NodeProto& node,
+                            const std::filesystem::path& ep_context_dir,
+                            std::string& payload);
 
 // --- OrtNode/OrtGraph overloads -------------------------------------------
 // GetCapability must decide whether this is a context model *before* paying for

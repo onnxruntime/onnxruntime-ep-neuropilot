@@ -1115,8 +1115,8 @@ NeuronStatus ModelBuilder::AddDLaOperand(const onnx::NodeProto& node,
   OperandType op_type(dla_op_type);
   NEURON_RETURN_IF_ERROR(AddNewOperand("NeuronDLAContent", op_type, index));
 
-  const std::string context_binary =
-      NeuronGraphContext::GetAttrString(node, EP_CACHE_CONTEXT, "");
+  std::string context_binary;
+  NEURON_RETURN_IF_ERROR(GetDlaPayload(node, ep_context_dir_, context_binary));
   NEURON_RETURN_STATUS_ON_ERROR_WITH_NOTE(
       neuron_.NeuronModel_setOperandValue(
           neuron_model_->model_, index,
@@ -1307,7 +1307,8 @@ NeuronStatus ModelBuilder::RestoredFromAdapterFormattedDla(
   NEURON_RETURN_IF_NOT(IsAdapterFormattedDlaNode(node),
                        "RestoredFromAdapterFormattedDla: node is not adapter DLA");
 
-  const std::string& dla_buffer = NeuronGraphContext::GetAttrString(node, EP_CACHE_CONTEXT, "");
+  std::string dla_buffer;
+  NEURON_RETURN_IF_ERROR(GetDlaPayload(node, ep_context_dir_, dla_buffer));
   auto& neuron_model = neuron_model_->model_;
   auto& neuron_comp  = neuron_model_->compilation_;
   NEURON_RETURN_IF_NOT(!neuron_model && !neuron_comp,

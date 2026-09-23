@@ -210,13 +210,7 @@ bool CheckIsConstantInitializer(const NeuronGraphContext& ctx,
                                  const std::string& input_name,
                                  const char* input_description);
 
-// DLA model helpers.
-bool GraphHasDlaNode(const NeuronGraphContext& ctx);
-bool GraphHasAdapterFormattedDlaNode(const NeuronGraphContext& ctx);
-NeuronStatus PartitionDlaModel(const NeuronGraphContext& ctx,
-                                int num_nodes,
-                                const std::function<std::string()>& gen_metadef_name,
-                                std::vector<std::vector<int>>& partitions_node_indices);
+// DLA model helpers live in onnx_ctx_model_helper.h.
 
 }  // namespace neuron
 }  // namespace onnxruntime

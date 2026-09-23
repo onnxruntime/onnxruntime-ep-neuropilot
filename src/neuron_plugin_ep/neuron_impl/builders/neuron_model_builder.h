@@ -129,6 +129,9 @@ class ModelBuilder {
 
   void SetUseFp16(bool use_fp16) { use_fp16_ = use_fp16; }
   void SetStoreDla(bool store_dla) { store_dla_ = store_dla; }
+  // Directory holding the context .onnx; used to resolve a sidecar DLA file
+  // referenced by an EPContext node with embed_mode=0.
+  void SetEpContextDir(std::filesystem::path dir) { ep_context_dir_ = std::move(dir); }
   void SetDlaPath(const std::filesystem::path& dla_path) { dla_path_ = dla_path; }
   void SetExecutePreference(neuron::wrapper::ExecutePreference pref) { exe_pref_ = pref; }
 
@@ -174,6 +177,7 @@ class ModelBuilder {
   bool use_fp16_{false};
   bool store_dla_{false};
   std::filesystem::path dla_path_{};
+  std::filesystem::path ep_context_dir_{};
   neuron::wrapper::ExecutePreference exe_pref_{
       neuron::wrapper::ExecutePreference::PREFER_FAST_SINGLE_ANSWER};
 

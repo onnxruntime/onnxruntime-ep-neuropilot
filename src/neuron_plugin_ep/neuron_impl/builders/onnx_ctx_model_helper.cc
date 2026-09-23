@@ -30,6 +30,15 @@ bool IsOwnedEpContextSource(const std::string& source) {
          s == "neuron" || s == "neuronexecutionprovider";
 }
 
+bool IsValidDlaNode(const onnx::NodeProto& node) {
+  if (node.op_type() != EP_CONTEXT_OP) return false;
+  if (!IsOwnedEpContextSource(
+          NeuronGraphContext::GetAttrString(node, SOURCE, ""))) {
+    return false;
+  }
+  return NeuronGraphContext::GetAttr(node, EP_CACHE_CONTEXT) != nullptr;
+}
+
 std::string GetOrtNodeAttrString(const OrtApi& ort_api, const OrtNode& node,
                                  const char* name, const std::string& def) {
   const OrtOpAttr* attr = nullptr;
@@ -83,16 +92,53 @@ bool GraphHasDlaNode(const OrtApi& ort_api, const OrtGraph& graph) {
   return false;
 }
 
+NeuronStatus GetDlaPayload(const onnx::NodeProto& node,
+                            const std::filesystem::path& ep_context_dir,
+                            std::string& payload) {
+  NEURON_RETURN_IF_NOT(IsValidDlaNode(node),
+                       "GetDlaPayload: not an EPContext node owned by this EP");
+
+  const std::string attr =
+      NeuronGraphContext::GetAttrString(node, EP_CACHE_CONTEXT, "");
+  NEURON_RETURN_IF_NOT(!attr.empty(),
+                       "EPContext node has an empty ep_cache_context");
+
+  // embed_mode=1 puts the blob straight in the attribute.
+  if (NeuronGraphContext::GetAttrInt(node, EMBED_MODE, 0) == 1) {
+    payload = attr;
+    return NeuronStatus::OK();
+  }
+
+  // embed_mode=0: the attribute is a file name resolved against the directory
+  // holding the context model.  A context model is untrusted input, so refuse
+  // anything that could escape that directory.
+  NEURON_RETURN_IF_NOT(!std::filesystem::path(attr).is_absolute(),
+                       "ep_cache_context must be a relative file name, got an "
+                       "absolute path");
+  NEURON_RETURN_IF_NOT(attr.find("..") == std::string::npos,
+                       "ep_cache_context must not contain '..'");
+  NEURON_RETURN_IF_NOT(!ep_context_dir.empty(),
+                       "ep_cache_context names a sidecar file but the context "
+                       "model directory is unknown");
+
+  const std::filesystem::path bin_path = ep_context_dir / attr;
+  NEURON_RETURN_IF_NOT(std::filesystem::is_regular_file(bin_path),
+                       MakeNeuronString("DLA sidecar file not found: ",
+                                        bin_path.string()));
+  NEURON_RETURN_IF_ERROR(ReadBinaryFileToString(bin_path, payload));
+  NEURON_RETURN_IF_NOT(!payload.empty(),
+                       MakeNeuronString("DLA sidecar file is empty: ",
+                                        bin_path.string()));
+  return NeuronStatus::OK();
+}
+
 bool IsAdapterFormattedDlaVersion(const NeuronRuntimeVersion& v) {
   return GreaterEqualVersion(v, {4, 3, 0});
 }
 
 bool IsAdapterFormattedDlaNode(const onnx::NodeProto& node) {
-  if (node.op_type() != EP_CONTEXT_OP) return false;
-  for (const auto& attr : node.attribute()) {
-    if (attr.name() == ADAPTER_DLA && attr.i() != 0) return true;
-  }
-  return false;
+  if (!IsValidDlaNode(node)) return false;
+  return NeuronGraphContext::GetAttrInt(node, ADAPTER_DLA, 0) != 0;
 }
 
 bool GraphHasDlaNode(const NeuronGraphContext& ctx) {

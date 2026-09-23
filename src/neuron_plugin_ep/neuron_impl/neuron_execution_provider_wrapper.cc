@@ -959,6 +959,40 @@ OrtStatus* NeuronWrapper_GetCapability(
 
   auto* state = static_cast<NeuronWrapperState*>(handle);
 
+  // A pre-compiled (EPContext) model carries the DLA in a node attribute and
+  // needs none of the op-capability machinery: claim each EPContext node we own
+  // as its own single-node partition and return.  This runs before
+  // OrtGraphToProto so an embedded multi-MB DLA blob is never copied into a
+  // proto just to be discarded, and it bypasses the partition filters below,
+  // which would reject an EPContext node as an unknown, compute-light op.
+  if (onnxruntime::neuron::GraphHasDlaNode(*ort_api, *graph)) {
+    size_t num_nodes = 0;
+    if (OrtStatus* st = ort_api->Graph_GetNumNodes(graph, &num_nodes)) return st;
+
+    std::vector<const OrtNode*> nodes(num_nodes, nullptr);
+    if (OrtStatus* st = ort_api->Graph_GetNodes(graph, nodes.data(), nodes.size()))
+      return st;
+
+    size_t claimed = 0;
+    for (const OrtNode* node : nodes) {
+      if (node == nullptr || !onnxruntime::neuron::IsValidDlaNode(*ort_api, *node))
+        continue;
+
+      OrtNodeFusionOptions opts{};
+      opts.ort_version_supported      = ORT_API_VERSION;
+      opts.drop_constant_initializers = false;
+
+      if (OrtStatus* st = ep_api->EpGraphSupportInfo_AddNodesToFuse(
+              support_info, &node, 1, &opts))
+        return st;
+      ++claimed;
+    }
+
+    LOGS_NEURON(INFO) << "NeuronEP GetCapability: EPContext model, claimed "
+                      << claimed << " of " << num_nodes << " nodes";
+    return nullptr;
+  }
+
   // Ort::Status owns the OrtStatus; assigning to a raw OrtStatus* frees it here
   onnx::GraphProto graph_proto;
   {
@@ -1084,8 +1118,12 @@ OrtStatus* NeuronWrapper_Compile(
 
   // Each partition gets its own DLA and its own EPContext node.  ORT requires a
   // node for every fused node once generation is enabled, so this must cover
-  // all of them or none.
-  const bool can_store_dla = state->context_cache_enabled && count > 0;
+  // all of them or none.  Not applicable when we are replaying a context model
+  // we just loaded.
+  const bool graph_is_context_model =
+      count > 0 && onnxruntime::neuron::GraphHasDlaNode(*ort_api, *graphs[0]);
+  const bool can_store_dla =
+      state->context_cache_enabled && count > 0 && !graph_is_context_model;
 
   // Real model I/O per partition, collected as each one compiles.  Used to give
   // the EPContext node the same inputs/outputs the Neuron model actually has.
@@ -1132,13 +1170,22 @@ OrtStatus* NeuronWrapper_Compile(
 
     builder.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
     builder.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+    builder.SetEpContextDir(context_model_path.parent_path());
     if (can_store_dla) {
       builder.SetStoreDla(true);
       builder.SetDlaPath(compiled_dla_paths[i]);
     }
 
+    // An adapter-formatted DLA is restored whole via
+    // NeuronModel_restoreFromCompiledNetwork.  Every other EPContext node is
+    // restored by ComposeNeuronModel(), which lowers it to a single
+    // com.mediatek.compiled_network RESTORE operation, so it goes through the
+    // ordinary Compile() path.
     std::unique_ptr<onnxruntime::neuron::wrapper::Model> model;
-    NeuronStatus ns = builder.Compile(model);
+    NeuronStatus ns =
+        onnxruntime::neuron::GraphHasAdapterFormattedDlaNode(ctx)
+            ? builder.RestoredFromAdapterFormattedDla(model)
+            : builder.Compile(model);
     if (!ns.IsOK()) {
       return ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
     }
