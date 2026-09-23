@@ -25,6 +25,20 @@
 #         -DORT_LIBRARY_DIR=${STAGING_LIBDIR}             \
 #         -DPROTOC_BIN=${STAGING_BINDIR_NATIVE}/protoc    \
 #         -S . -B build
+#
+# Example (aarch64 Linux cross-compile):
+#   cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64.cmake \
+#         -DORT_INCLUDE_DIR=... -DNEURON_OP_CAPABILITY_LIB_DIR=... \
+#         -S . -B build-aarch64
+#
+# Example (Android cross-compile, NDK):
+#   cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-android.cmake \
+#         -DANDROID_NDK_HOME=/path/to/android-ndk               \
+#         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
+#         -DORT_INCLUDE_DIR=... -DNEURON_OP_CAPABILITY_LIB_DIR=... \
+#         -S . -B build-android
+#   The same sources serve both targets; the Android-only code paths are behind
+#   __ANDROID__ in src/neuron_plugin_ep/neuron_impl/neuron_lib/.
 
 cmake_minimum_required(VERSION 3.25)
 cmake_policy(SET CMP0091 NEW)
@@ -257,6 +271,12 @@ target_link_libraries(onnxruntime_providers_neuron PRIVATE
 if(ORT_LIB)
   target_link_libraries(onnxruntime_providers_neuron PRIVATE "${ORT_LIB}")
 endif()
+if(ANDROID)
+  # neuron_lib/ logs through __android_log_* on Android (see the ___NeuronAdapter
+  # shim and neuron_implementation.cc), which lives in liblog. On Linux those
+  # paths compile out under #ifndef __ANDROID__ and there is nothing to link.
+  target_link_libraries(onnxruntime_providers_neuron PRIVATE log)
+endif()
 
 # ---------------------------------------------------------------------------
 # Symbol visibility
@@ -393,6 +413,11 @@ endif()
 # ---------------------------------------------------------------------------
 message(STATUS "")
 message(STATUS "=== onnxruntime_providers_neuron (Plugin EP – standalone) ===")
+if(ANDROID)
+  message(STATUS "  Target platform   : Android ${ANDROID_ABI} / ${ANDROID_PLATFORM}")
+else()
+  message(STATUS "  Target platform   : ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
 message(STATUS "  ORT include dir   : ${ORT_INCLUDE_DIR}")
 message(STATUS "  ORT library       : ${ORT_LIB}")
 message(STATUS "  neuron_impl dir   : ${NEURON_IMPL_DIR}")
