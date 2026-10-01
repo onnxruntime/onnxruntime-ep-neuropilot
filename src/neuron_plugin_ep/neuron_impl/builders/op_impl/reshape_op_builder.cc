@@ -76,6 +76,11 @@ NeuronStatus ReshapeOpBuilder::AddToModelBuilderImpl(
     shape[i] = (dim == 0 && i < input_shape.size()) ? static_cast<int32_t>(input_shape[i]) : dim;
   }
 
+  // A rank>4 target gets its leading unit dims squeezed, matching how the
+  // output operand is declared.
+  while (shape.size() > 4 && shape.front() == 1)
+    shape.erase(shape.begin());
+
   return AddReshapeOperator(model_builder, node, ctx, input, shape);
 }
 void CreateReshapeOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations) {

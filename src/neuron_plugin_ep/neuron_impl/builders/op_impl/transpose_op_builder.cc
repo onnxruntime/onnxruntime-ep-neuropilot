@@ -58,6 +58,17 @@ NeuronStatus TransposeOpBuilder::AddToModelBuilderImpl(
   } else {
     perm.reserve(perm_int64.size());
     for (int64_t v : perm_int64) perm.push_back(static_cast<int32_t>(v));
+    // The operand may have had leading unit dims squeezed; the
+    // ONNX perm then has more entries than the operand has dims.  That is only
+    // valid when the perm leaves the squeezed leading axes in place.
+    const int32_t squeezed = static_cast<int32_t>(perm.size()) - input_dims;
+    if (squeezed > 0) {
+      for (int32_t i = 0; i < squeezed; i++)
+        NEURON_RETURN_IF_NOT(perm[static_cast<size_t>(i)] == i,
+                              "Transpose: perm moves a squeezed leading unit dim");
+      perm.erase(perm.begin(), perm.begin() + squeezed);
+      for (auto& v : perm) v -= squeezed;
+    }
     NEURON_RETURN_IF_NOT(static_cast<int32_t>(perm.size()) == input_dims,
                           "Perm and input should have the same number of dimensions");
   }

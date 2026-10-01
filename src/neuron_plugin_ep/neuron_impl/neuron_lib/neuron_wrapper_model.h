@@ -111,6 +111,17 @@ class Model {
 
   bool IsScalarOutput(const std::string& output_name) const;
 
+  // Rank of the output in the ONNX graph.  Operands with leading unit dims
+  // squeezed away are re-padded to this rank when the output
+  // shape is reported to ORT.  0 means "same as the operand".
+  void SetOrtOutputRank(const std::string& output_name, size_t rank) {
+    ort_output_ranks_[output_name] = rank;
+  }
+  size_t GetOrtOutputRank(const std::string& output_name) const {
+    auto it = ort_output_ranks_.find(output_name);
+    return it != ort_output_ranks_.end() ? it->second : 0;
+  }
+
   NeuronStatus PrepareForExecution(std::unique_ptr<Execution>& execution);
   NeuronStatus PrepareForSharedExecution(std::shared_ptr<Execution>& execution);
 
@@ -140,6 +151,7 @@ class Model {
   uint32_t rotary_half_{0};
   std::string seqlens_input_name_;
   std::unordered_map<std::string, std::string> onnx_to_neuron_output_map_;
+  std::unordered_map<std::string, size_t> ort_output_ranks_;
 
   std::mutex mutex_;
 

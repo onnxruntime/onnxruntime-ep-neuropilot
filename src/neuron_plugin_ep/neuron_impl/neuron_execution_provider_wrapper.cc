@@ -90,8 +90,17 @@ struct NeuronWrapperState {
   // NEURON_FLAG_PARTITION_COUNT: instead of a byte budget, cut each oversized
   // group into this many chunks balanced by constant bytes (0 = use the budget).
   uint32_t partition_count{0};
+  // NEURON_FLAG_COMPUTE_LIGHT_MIN_NODES: keep a partition without any
+  // conv/matmul once it has at least this many nodes (e.g. a detection head's
+  // anchor decode); smaller compute-light fragments run faster on CPU than as
+  // an NPU dispatch.  0 drops every compute-light partition.
+  uint32_t compute_light_min_nodes{16};
   std::string optimization_string;
   std::unordered_set<std::string> force_skip_ops;
+  // NEURON_FLAG_SKIP_NODE_PREFIXES: comma-separated node-name prefixes left on
+  // CPU.  Precision escape hatch for individual nodes the NPU cannot run
+  // faithfully, e.g. an attention matmul whose logits exceed fp16 range.
+  std::vector<std::string> skip_node_prefixes;
 
   // EPContext (DLA cache) generation.  Mirrors ep.context_* session options.
   bool        context_cache_enabled{false};
@@ -222,7 +231,7 @@ struct NeuronNodeComputeInfo : OrtNodeComputeInfo {
     }
 
     // Pre-build input metadata.
-    // Synth inputs (host-computed GQA position) have no ORT slot: 
+    // Synth inputs (host-computed GQA position) have no ORT slot:
     // they get a state-owned buffer instead.
     const auto& model_inputs = model->GetInputs();
     cs->input_infos.resize(model_inputs.size());
@@ -270,7 +279,13 @@ struct NeuronNodeComputeInfo : OrtNodeComputeInfo {
       // Build the int64 shape vector once; leave empty for scalar outputs.
       if (!model->IsScalarOutput(name)) {
         const auto& dims = out_type.dimensions;
-        cs->output_infos[i].shape_i64.assign(dims.begin(), dims.end());
+        auto& shape_i64 = cs->output_infos[i].shape_i64;
+        shape_i64.assign(dims.begin(), dims.end());
+        // Re-pad leading unit dims the operand had squeezed away,
+        // so ORT sees the tensor at its ONNX rank.
+        const size_t ort_rank = model->GetOrtOutputRank(name);
+        while (shape_i64.size() < ort_rank)
+          shape_i64.insert(shape_i64.begin(), 1);
       }
     }
 
@@ -654,6 +669,18 @@ static std::vector<std::vector<int>> FindSupportedGroups(
     // Force-skipped ops.
     if (state->force_skip_ops.count(op)) continue;
 
+    // Force-skipped node-name prefixes.
+    {
+      bool skip = false;
+      for (const auto& p : state->skip_node_prefixes)
+        if (node.name().compare(0, p.size(), p) == 0) { skip = true; break; }
+      if (skip) {
+        LOGS_NEURON(VERBOSE) << "Node [" << node.name()
+                             << "] matches NEURON_FLAG_SKIP_NODE_PREFIXES — leaving on CPU";
+        continue;
+      }
+    }
+
     // Op-builder support check.
     const auto it = op_builders.find(op);
     if (it == op_builders.end() ||
@@ -686,6 +713,25 @@ static std::vector<std::vector<int>> FindSupportedGroups(
     const QDQNodeGroup* qdq = nullptr;
     for (const auto& out : node.output()) {
       if (!out.empty()) { qdq = ctx.GetQDQGroup(out); if (qdq) break; }
+    }
+
+    if (qdq == nullptr) {
+      bool dq_wrapped_const = false;
+      for (const auto& inp : node.input()) {
+        if (inp.empty() || ctx.IsInitializer(inp)) continue;
+        const auto* p = ctx.GetProducer(inp);
+        if (p && p->op_type() == "DequantizeLinear" && p->input_size() > 0 &&
+            ctx.IsInitializer(p->input(0))) {
+          dq_wrapped_const = true;
+          break;
+        }
+      }
+      if (dq_wrapped_const) {
+        LOGS_NEURON(INFO) << "Node [" << node.name() << "] op [" << op
+                          << "] consumes a standalone dequantized constant "
+                             "(weight-only quantization) — leaving on CPU";
+        continue;
+      }
     }
 
     // Live INT64 input check.  Neuron cannot represent INT64 operands, and an
@@ -956,7 +1002,10 @@ static std::vector<std::vector<int>> FindSupportedGroups(
                            << ") — falling back to CPU to avoid rejecting all capability";
       continue;
     }
-    if (!partition_has_heavy_op(kv.second)) {
+
+    if (!partition_has_heavy_op(kv.second) &&
+        (state->compute_light_min_nodes == 0 ||
+         kv.second.size() < state->compute_light_min_nodes)) {
       LOGS_NEURON(VERBOSE) << "Dropping compute-light partition (size "
                            << kv.second.size()
                            << ") — no conv/matmul; runs faster on CPU than as an NPU dispatch";
@@ -1179,6 +1228,19 @@ NeuronWrapperHandle NeuronWrapper_Create(
   if (!max_pb.empty()) s->max_partition_bytes = std::stoull(max_pb);
   auto part_count = get("NEURON_FLAG_PARTITION_COUNT");
   if (!part_count.empty()) s->partition_count = static_cast<uint32_t>(std::stoul(part_count));
+  auto light_min = get("NEURON_FLAG_COMPUTE_LIGHT_MIN_NODES");
+  if (!light_min.empty()) s->compute_light_min_nodes = static_cast<uint32_t>(std::stoul(light_min));
+
+  {
+    std::string prefixes = get("NEURON_FLAG_SKIP_NODE_PREFIXES");
+    size_t start = 0;
+    while (start < prefixes.size()) {
+      size_t end = prefixes.find(',', start);
+      if (end == std::string::npos) end = prefixes.size();
+      if (end > start) s->skip_node_prefixes.emplace_back(prefixes.substr(start, end - start));
+      start = end + 1;
+    }
+  }
 
   // EPContext (DLA cache) generation.
   s->context_cache_enabled     = get("ep.context_enable") == "1";

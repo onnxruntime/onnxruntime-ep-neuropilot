@@ -79,9 +79,15 @@ NeuronStatus ConcatOpBuilder::AddToModelBuilderImpl(
     y_zero_point = operand_types.at(input0).operandType.zeroPoint;
   }
 
+  // Normalize the axis against the ONNX rank, then shift it down by however
+  // many leading unit dims the operand had squeezed away.
+  int32_t onnx_rank = static_cast<int32_t>(ctx.GetShape(input0).size());
   int32_t rank = static_cast<int32_t>(shaper[input0].size());
+  if (onnx_rank < rank) onnx_rank = rank;
   int32_t axis = static_cast<int32_t>(
-      HandleNegativeAxis(NeuronGraphContext::GetAttrInt(node, "axis", 1), rank));
+      HandleNegativeAxis(NeuronGraphContext::GetAttrInt(node, "axis", 1), onnx_rank));
+  axis -= onnx_rank - rank;
+  NEURON_RETURN_IF_NOT(axis >= 0, "Concat: axis lies on a squeezed leading unit dim");
 
   ADD_SCALAR_OPERAND(model_builder, input_indices, axis);
 

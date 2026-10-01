@@ -66,7 +66,16 @@ NeuronStatus SplitOpBuilder::AddToModelBuilderImpl(
     const NeuronGraphContext& ctx) const {
   const auto& input_name = node.input(0);
 
-  const int32_t axis = static_cast<int32_t>(NeuronGraphContext::GetAttrInt(node, "axis", 0));
+  // Normalize the axis against the ONNX rank, then shift it down by however
+  // many leading unit dims the operand had squeezed away.
+  auto& shaper(model_builder.GetShaper());
+  int32_t onnx_rank = static_cast<int32_t>(ctx.GetShape(input_name).size());
+  const int32_t rank = static_cast<int32_t>(shaper[input_name].size());
+  if (onnx_rank < rank) onnx_rank = rank;
+  int32_t axis = static_cast<int32_t>(
+      HandleNegativeAxis(NeuronGraphContext::GetAttrInt(node, "axis", 0), onnx_rank));
+  axis -= onnx_rank - rank;
+  NEURON_RETURN_IF_NOT(axis >= 0, "Split: axis lies on a squeezed leading unit dim");
 
   // Determine number of outputs.
   // In opset 18+, num_outputs is a required attribute; in opset 13-17 it equals

@@ -334,6 +334,7 @@ NeuronStatus ModelBuilder::RegisterInitializers() {
     for (auto dim : tensor.dims()) shape.push_back(static_cast<uint32_t>(dim));
     // Neuron treats empty-shape as dynamic-rank; treat scalar as {1}
     if (shape.empty()) shape.push_back(1);
+    shape = SqueezeLeadingUnitDims(std::move(shape));
 
     // Build OnnxDataTypeInfo from element type.
     // For INT8/UINT8/INT16 initializers consumed by an absorbed DQ node,
@@ -567,6 +568,15 @@ NeuronStatus ModelBuilder::RegisterModelOutputs() {
     output_index_vec_.push_back(operand_indices_[output_name]);
     neuron_model_->AddOutput(output_name, output_name,
                              operand_types_.at(output_name));
+
+    // Outputs squeezed, must be reported to ORT at their
+    // original ONNX rank, we record that rank here.
+    const auto& out_type_proto = output.type();
+    if (out_type_proto.has_tensor_type() && out_type_proto.tensor_type().has_shape()) {
+      neuron_model_->SetOrtOutputRank(
+          output_name,
+          static_cast<size_t>(out_type_proto.tensor_type().shape().dim_size()));
+    }
   }
   return NeuronStatus::OK();
 }
@@ -925,6 +935,7 @@ NeuronStatus ModelBuilder::AddOperandFromConstantInitializer(
   Shape shape;
   for (auto dim : initializer->dims()) shape.push_back(static_cast<uint32_t>(dim));
   if (shape.empty()) shape.push_back(1);
+  shape = SqueezeLeadingUnitDims(std::move(shape));
   shaper_.AddShape(initializer_name, shape);
 
   wrapper::OnnxDataTypeInfo type_info;
@@ -1424,6 +1435,12 @@ NeuronStatus ModelBuilder::RestoredFromAdapterFormattedDla(
     Shape shape = shaper_[out_name];
     OperandType op_type(type_info, shape);
     neuron_model_->AddOutput(out_name, out_name, op_type);
+
+    // Outputs squeezed, must be reported to ORT at their
+    // original ONNX rank, we record that rank here.
+    const auto onnx_shape = ctx_.GetShape(out_name);
+    if (!onnx_shape.empty())
+      neuron_model_->SetOrtOutputRank(out_name, onnx_shape.size());
   }
 
   model.reset(neuron_model_.release());
