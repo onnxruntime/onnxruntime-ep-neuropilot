@@ -191,7 +191,16 @@ NeuronStatus ReductionOpBuilder::AddToModelBuilderImpl(
 
   ADD_SCALAR_OPERAND(model_builder, input_indices, keepdims ? 1 : 0);
 
-  const OperandType output_operand_type(operand_types.at(input).type, output_dimen);
+  const auto& in_type = operand_types.at(input);
+  float y_scale = in_type.operandType.scale;
+  int32_t y_zero_point = in_type.operandType.zeroPoint;
+  if (const auto* qdq = ctx.GetQDQGroup(output);
+      qdq && qdq->output_quant_params.has_value()) {
+    y_scale = qdq->output_quant_params->scale;
+    y_zero_point = qdq->output_quant_params->zero_point;
+  }
+  const OperandType output_operand_type(in_type.type, output_dimen, y_scale,
+                                        y_zero_point);
   NEURON_RETURN_IF_ERROR(model_builder.AddOperation(op_code, input_indices,
                                                      {output}, {output_operand_type}));
 

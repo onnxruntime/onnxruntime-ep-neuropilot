@@ -99,7 +99,10 @@ NeuronStatus PadOpBuilder::AddToModelBuilderImpl(
   ADD_SCALAR_OPERAND(model_builder, input_indices, pad_value);
 
   const auto& output = node.output(0);
-  const OperandType output_operand_type{operand_types.at(data).type, shaper[output]};
+  const auto& input_type = operand_types.at(data);
+  const OperandType output_operand_type{input_type.type, shaper[output],
+                                        input_type.operandType.scale,
+                                        input_type.operandType.zeroPoint};
 
   return model_builder.AddOperation(NEURON_PAD_V2, input_indices, {output}, {output_operand_type});
 }
