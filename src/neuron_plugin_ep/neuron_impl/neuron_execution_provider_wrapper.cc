@@ -415,6 +415,25 @@ struct DisjointSet {
 // bias initializer directly and treat the op as unsupported, so the convex
 // partitioner routes it (and only it) to CPU.
 // ============================================================================
+// True if a node in `group` has an input that ComputeImpl reads on the host
+// from the fused node's inputs and that input is a constant initializer.  With
+// drop_constant_initializers ORT removes constant initializers from the fused
+// node's inputs, so the by-name lookup in CreateState would find nothing.
+static bool GroupReadsConstantAtRuntime(
+    const onnx::GraphProto& graph,
+    const onnxruntime::neuron::NeuronGraphContext& ctx,
+    const std::vector<int>& group) {
+  constexpr int kGqaSeqlensK = 5;  // GroupQueryAttention: read in ComputeImpl
+  for (int idx : group) {
+    const auto& node = graph.node(idx);
+    if (node.op_type() == "GroupQueryAttention" &&
+        node.input_size() > kGqaSeqlensK &&
+        ctx.IsInitializer(node.input(kGqaSeqlensK)))
+      return true;
+  }
+  return false;
+}
+
 static bool HasSaturatedInt32Bias(const onnx::NodeProto& node,
                                    const onnxruntime::neuron::NeuronGraphContext& ctx) {
   const std::string& op = node.op_type();
@@ -1327,9 +1346,12 @@ OrtStatus* NeuronWrapper_GetCapability(
 
     if (group_nodes.empty()) continue;
 
+    // Compile copies every constant into Neuron operands and inference never
+    // reads ORT's, so let ORT release its copy once Compile returns.
     OrtNodeFusionOptions opts{};
     opts.ort_version_supported      = state->ort_api_version;
-    opts.drop_constant_initializers = false;
+    opts.drop_constant_initializers =
+        !GroupReadsConstantAtRuntime(graph_proto, ctx, group);
 
     OrtStatus* st = ep_api->EpGraphSupportInfo_AddNodesToFuse(
         support_info, group_nodes.data(), group_nodes.size(), &opts);
