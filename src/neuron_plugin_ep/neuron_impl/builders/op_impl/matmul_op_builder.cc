@@ -67,6 +67,34 @@ static bool ShouldLowerAsFullyConnected(const onnx::NodeProto& node,
   return a_shape.size() == 2 || (a_shape.size() == 3 && a_shape[0] == 1);
 }
 
+// A float MatMul whose B is a constant of rank >= 3 lowers to one
+// NEURON_FULLY_CONNECTED per batch slice of B, for the same MDLA defect: a
+// constant B in NEURON_BATCH_MATMUL is garbage at every rank (measured on the
+// Genio 720 EVK: Conformer relative-position attention [1,8,7,128]x[1,8,128,125]
+// gives cosine ~0.01 against the CPU EP), while FULLY_CONNECTED with a constant
+// rank-2 weight is exact.  Handles B's batch dims equal to A's, or all 1 (B
+// broadcast over A's batch); anything else keeps the BATCH_MATMUL lowering.
+static bool ShouldLowerAsBatchedFullyConnected(const onnx::NodeProto& node,
+                                               const NeuronGraphContext& ctx) {
+  if (node.op_type() != "MatMul" || node.input_size() < 2) return false;
+  const auto* b = ctx.GetInitializer(node.input(1));
+  if (b == nullptr || b->data_type() != onnx::TensorProto::FLOAT || b->dims_size() < 3)
+    return false;
+  const Shape a_shape = ctx.GetShape(node.input(0));
+  const size_t rank = a_shape.size();
+  if (rank != static_cast<size_t>(b->dims_size())) return false;
+  for (const uint32_t d : a_shape)
+    if (d == 0) return false;  // static shapes only
+  if (static_cast<int64_t>(a_shape[rank - 1]) != b->dims(static_cast<int>(rank) - 2)) return false;
+
+  bool b_batch_is_one = true, same_batch = true;
+  for (size_t i = 0; i + 2 < rank; ++i) {
+    if (b->dims(static_cast<int>(i)) != 1) b_batch_is_one = false;
+    if (static_cast<int64_t>(a_shape[i]) != b->dims(static_cast<int>(i))) same_batch = false;
+  }
+  return b_batch_is_one || same_batch;
+}
+
 class MatMulOpBuilder : public BaseOpBuilder {
  public:
   void AddInitializersToSkip(ModelBuilder& model_builder,
@@ -81,6 +109,9 @@ class MatMulOpBuilder : public BaseOpBuilder {
   NeuronStatus BuildConstBFullyConnected(ModelBuilder& model_builder,
                                           const onnx::NodeProto& node,
                                           const NeuronGraphContext& ctx) const;
+  NeuronStatus BuildConstBBatchedFullyConnected(ModelBuilder& model_builder,
+                                                 const onnx::NodeProto& node,
+                                                 const NeuronGraphContext& ctx) const;
 
   bool HasSupportedInputsImpl(const onnx::NodeProto& node,
                                      const NeuronGraphContext& ctx,
@@ -132,6 +163,10 @@ void MatMulOpBuilder::AddInitializersToSkip(ModelBuilder& model_builder,
   if (node.op_type() == "MatMul" && ShouldLowerAsFullyConnected(node, ctx)) {
     model_builder.AddInitializerToSkip(ResolveConstantMatMulB(node, ctx));
   }
+  // The per-batch FULLY_CONNECTED route adds each slice of B itself (transposed).
+  if (ShouldLowerAsBatchedFullyConnected(node, ctx)) {
+    model_builder.AddInitializerToSkip(node.input(1));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +210,10 @@ NeuronStatus MatMulOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   if (ShouldLowerAsFullyConnected(node, ctx)) {
     LOGS_NEURON(VERBOSE) << "Const-B MatMul: lowering as NEURON_FULLY_CONNECTED";
     return BuildConstBFullyConnected(model_builder, node, ctx);
+  }
+  if (ShouldLowerAsBatchedFullyConnected(node, ctx)) {
+    LOGS_NEURON(VERBOSE) << "Const-B batched MatMul: lowering as per-batch NEURON_FULLY_CONNECTED";
+    return BuildConstBBatchedFullyConnected(model_builder, node, ctx);
   }
   if (op_builder_helpers::IsSupportedBatchMatMul(node, ctx, model_builder.GetNeuronVersion())) {
     LOGS_NEURON(VERBOSE) << "Use NEURON_BATCH_MATMUL to support MatMul";
@@ -381,6 +420,110 @@ NeuronStatus MatMulOpBuilder::BuildConstBFullyConnected(
   NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_FULLY_CONNECTED, input_indices,
                                                     {fc_out}, {fc_out_operand}));
   return model_builder.AddReshape(fc_out, {1, a_shape[1], n_dim}, output);
+}
+
+// ---------------------------------------------------------------------------
+// BuildConstBBatchedFullyConnected — float MatMul with a constant B of rank >= 3
+// (see ShouldLowerAsBatchedFullyConnected).  Each batch slice of B becomes a
+// constant FC weight, transposed here to FC's [n, k] layout.
+//   B batch all 1:   A -> [batch*m, k] -> one FC -> reshape to the output
+//   B batch == A's:  A -> [batch, m, k] -> split -> per-slice FC -> concat
+// ---------------------------------------------------------------------------
+NeuronStatus MatMulOpBuilder::BuildConstBBatchedFullyConnected(
+    ModelBuilder& model_builder, const onnx::NodeProto& node,
+    const NeuronGraphContext& ctx) const {
+  auto& shaper(model_builder.GetShaper());
+  const auto& operand_indices(model_builder.GetOperandIndices());
+  const auto& operand_types(model_builder.GetOperandTypes());
+
+  const std::string& a = node.input(0);
+  const std::string& output = node.output(0);
+  const onnx::TensorProto& b = *ctx.GetInitializer(node.input(1));
+  const Shape a_shape = ctx.GetShape(a);
+  const size_t rank = a_shape.size();
+  const uint32_t m = a_shape[rank - 2];
+  const uint32_t k = a_shape[rank - 1];
+  const uint32_t n = static_cast<uint32_t>(b.dims(static_cast<int>(rank) - 1));
+  uint32_t a_batch = 1, b_batch = 1;
+  for (size_t i = 0; i + 2 < rank; ++i) {
+    a_batch *= a_shape[i];
+    b_batch *= static_cast<uint32_t>(b.dims(static_cast<int>(i)));
+  }
+  Shape out_shape(a_shape.begin(), a_shape.end() - 2);
+  out_shape.push_back(m);
+  out_shape.push_back(n);
+
+  const auto* b_data = static_cast<const float*>(GetRawInitializerData(b));
+  NEURON_RETURN_IF_NOT(b_data != nullptr, "MatMul: constant B '", node.input(1), "' has no data");
+  const Type out_type = operand_types.at(a).type;
+  const int32_t fuse_code = model_builder.FindActivation(node, ctx);
+
+  const std::string bias = model_builder.GetUniqueName(node.name() + "/zero_bias");
+  {
+    const std::vector<float> zeros(n, 0.0f);
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(
+        bias, zeros.data(), OperandType(Type::TENSOR_FLOAT32, Shape{n})));
+  }
+
+  // FC of a [rows, k] input against slice `s` of B ([k, n] -> weight [n, k]).
+  auto add_fc = [&](const std::string& in, uint32_t rows, uint32_t s,
+                    const std::string& out) -> NeuronStatus {
+    const std::string weight =
+        model_builder.GetUniqueName(node.input(1) + "/fc_weight_" + std::to_string(s));
+    const float* src = b_data + static_cast<size_t>(s) * k * n;
+    std::vector<float> transposed(static_cast<size_t>(n) * k);
+    for (uint32_t r = 0; r < k; ++r)
+      for (uint32_t c = 0; c < n; ++c)
+        transposed[static_cast<size_t>(c) * k + r] = src[static_cast<size_t>(r) * n + c];
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(
+        weight, transposed.data(), OperandType(Type::TENSOR_FLOAT32, Shape{n, k})));
+
+    std::vector<uint32_t> input_indices{operand_indices.at(in), operand_indices.at(weight),
+                                        operand_indices.at(bias)};
+    ADD_SCALAR_OPERAND(model_builder, input_indices, fuse_code);
+    const Shape fc_shape{rows, n};
+    shaper.AddShape(out, fc_shape);
+    return model_builder.AddOperation(NEURON_FULLY_CONNECTED, input_indices, {out},
+                                      {OperandType(out_type, fc_shape)});
+  };
+
+  if (b_batch == 1) {
+    const uint32_t rows = a_batch * m;
+    const std::string fc_in = model_builder.GetUniqueName(node.name() + "/fc_in");
+    NEURON_RETURN_IF_ERROR(model_builder.AddReshape(a, {rows, k}, fc_in));
+    const std::string fc_out = model_builder.GetUniqueName(node.name() + "/fc_out");
+    NEURON_RETURN_IF_ERROR(add_fc(fc_in, rows, 0, fc_out));
+    return model_builder.AddReshape(fc_out, out_shape, output);
+  }
+
+  // b_batch == a_batch >= 2 here.
+  const std::string a3 = model_builder.GetUniqueName(node.name() + "/a3");
+  NEURON_RETURN_IF_ERROR(model_builder.AddReshape(a, {a_batch, m, k}, a3));
+  std::vector<std::string> a_slices;
+  a_slices.reserve(a_batch);
+  for (uint32_t s = 0; s < a_batch; ++s)
+    a_slices.push_back(model_builder.GetUniqueName(node.name() + "/a_slice_" + std::to_string(s)));
+  NEURON_RETURN_IF_ERROR(op_builder_helpers::AddNeuronSplit(model_builder, a3, 0, a_slices));
+
+  std::vector<uint32_t> concat_indices;
+  concat_indices.reserve(a_batch + 1);
+  for (uint32_t s = 0; s < a_batch; ++s) {
+    const std::string a2 = model_builder.GetUniqueName(node.name() + "/fc_in_" + std::to_string(s));
+    NEURON_RETURN_IF_ERROR(model_builder.AddReshape(a_slices[s], {m, k}, a2));
+    const std::string fc_out = model_builder.GetUniqueName(node.name() + "/fc_out_" + std::to_string(s));
+    NEURON_RETURN_IF_ERROR(add_fc(a2, m, s, fc_out));
+    const std::string y3 = model_builder.GetUniqueName(node.name() + "/y_slice_" + std::to_string(s));
+    NEURON_RETURN_IF_ERROR(model_builder.AddReshape(fc_out, {1, m, n}, y3));
+    concat_indices.push_back(operand_indices.at(y3));
+  }
+  const int32_t concat_axis = 0;
+  ADD_SCALAR_OPERAND(model_builder, concat_indices, concat_axis);
+  const std::string joined = model_builder.GetUniqueName(node.name() + "/joined");
+  const Shape joined_shape{a_batch, m, n};
+  shaper.AddShape(joined, joined_shape);
+  NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_CONCATENATION, concat_indices, {joined},
+                                                    {OperandType(out_type, joined_shape)}));
+  return model_builder.AddReshape(joined, out_shape, output);
 }
 
 void CreateMatMulOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations) {
