@@ -1252,6 +1252,7 @@ NeuronStatus ModelBuilder::AddDlaOperation(const onnx::NodeProto& node,
 // ValidateDeviceSupport
 // ---------------------------------------------------------------------------
 NeuronStatus ModelBuilder::ValidateDeviceSupport() {
+  if (composed_) return NeuronStatus::OK();
   NEURON_RETURN_IF_ERROR(ComposeNeuronModel());
 
   LOGS_NEURON(VERBOSE) << "Identifying inputs: " << Shape2String(input_index_vec_)
@@ -1274,6 +1275,7 @@ NeuronStatus ModelBuilder::ValidateDeviceSupport() {
   NEURON_RETURN_STATUS_ON_ERROR_WITH_NOTE(
       neuron_.NeuronModel_finish(neuron_model_->model_),
       "NeuronModel_finish");
+  composed_ = true;
 
   if (neuron_target_devices_.empty()) return NeuronStatus::OK();
 

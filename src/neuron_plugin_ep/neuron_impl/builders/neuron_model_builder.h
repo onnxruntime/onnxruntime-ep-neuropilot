@@ -232,6 +232,10 @@ class ModelBuilder {
   // false when no target devices were resolved, so Compile() stays device-agnostic
   bool device_support_validated_ = false;
 
+  // ComposeNeuronModel + NeuronModel_finish done; ValidateDeviceSupport is then
+  // a no-op, so a caller can run it ahead of Compile().
+  bool composed_ = false;
+
   std::string neuron_optimization_string_;
 
   NeuronStatus ComposeNeuronModel();
