@@ -343,6 +343,16 @@ struct NeuronNodeComputeInfo : OrtNodeComputeInfo {
 };
 
 // ============================================================================
+// Frees each initializer's bytes but keeps the TensorProto (name, dims) valid,
+// since NeuronGraphContext holds pointers to them.  clear() would keep the
+// string's capacity, so swap with an empty one instead.
+// ============================================================================
+static void ReleaseInitializerData(onnx::GraphProto& graph) {
+  for (auto& tensor : *graph.mutable_initializer())
+    std::string().swap(*tensor.mutable_raw_data());
+}
+
+// ============================================================================
 // Helper: read a string key from OrtKeyValuePairs or return empty string.
 // ============================================================================
 static std::string GetKV(const OrtApi* ort_api,
@@ -1435,10 +1445,19 @@ OrtStatus* NeuronWrapper_Compile(
     // com.mediatek.compiled_network RESTORE operation, so it goes through the
     // ordinary Compile() path.
     std::unique_ptr<onnxruntime::neuron::wrapper::Model> model;
-    NeuronStatus ns =
-        onnxruntime::neuron::GraphHasAdapterFormattedDlaNode(ctx)
-            ? builder.RestoredFromAdapterFormattedDla(model)
-            : builder.Compile(model);
+    NeuronStatus ns;
+    if (onnxruntime::neuron::GraphHasAdapterFormattedDlaNode(ctx)) {
+      ns = builder.RestoredFromAdapterFormattedDla(model);
+    } else {
+      // Build and finish the Neuron model first.  Its weights then live in the
+      // builder's own buffers, so drop the proto's copy before the compile,
+      // which is the long, memory-heavy step.
+      ns = builder.ValidateDeviceSupport();
+      if (ns.IsOK()) {
+        ReleaseInitializerData(subgraph_proto);
+        ns = builder.Compile(model);
+      }
+    }
     if (!ns.IsOK()) {
       return ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
     }
