@@ -1374,6 +1374,14 @@ NeuronStatus ModelBuilder::Compile(std::unique_ptr<wrapper::Model>& model) {
     NEURON_RETURN_IF_ERROR(WriteBinaryStringToFile(dla_path_, dla_buffer));
   }
 
+  // NeuronModel_setOperandValue only needs these buffers to outlive
+  // NeuronCompilation_finish (see its docs in ___NeuronAdapter.h); the compiled
+  // network holds its own copy.  model_ and compilation_ stay: the model must
+  // outlive the compilation.
+  neuron_model_->mem_initializers_.reset();
+  neuron_model_->mem_persist_buffers_.clear();
+  neuron_model_->mem_persist_buffers_.shrink_to_fit();
+
   model.reset(neuron_model_.release());
   return NeuronStatus::OK();
 }
