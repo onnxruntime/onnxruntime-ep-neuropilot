@@ -26,6 +26,8 @@
 //     We skip: a_scale(3), a_zp(4), b_scale(5), b_zp(6), y_scale(7), y_zp(8)
 //     and optionally B(1) if not transposed, bias(2), bias_scale, bias_zp.
 
+#include <cmath>
+
 #include "base_op_builder.h"
 
 #include <onnx/onnx_pb.h>
@@ -131,8 +133,15 @@ void GemmOpBuilder::AddInitializersToSkip(ModelBuilder& model_builder,
 
     // Skip bias (C) and its quant params if present.
     if (node.input_size() > 2 && !node.input(2).empty()) {
-      // For QDQGemm, bias is int32 – skip it (we'll add it inline).
-      model_builder.AddInitializerToSkip(node.input(2));
+      // For QDQGemm, bias is int32 – skip it (we'll add it inline).  When it
+      // reaches the node through a DequantizeLinear, skip the int32 initializer.
+      const auto* bias_dq = ctx.GetProducer(node.input(2));
+      if (bias_dq && bias_dq->op_type() == "DequantizeLinear" && bias_dq->input_size() > 0 &&
+          ctx.GetInitializer(bias_dq->input(0))) {
+        model_builder.AddInitializerToSkip(bias_dq->input(0));
+      } else {
+        model_builder.AddInitializerToSkip(node.input(2));
+      }
     }
   } else {
     // For non-quantized Gemm: if B is not transposed it must be an initializer
@@ -249,8 +258,14 @@ NeuronStatus GemmOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
         bias_idx = operand_indices.at(bias);
       }
     } else {
-      // QDQGemm: bias must be int32.
+      // QDQGemm: bias must be int32, either a direct initializer or the
+      // DequantizeLinear of an int32 initializer.
       const auto* bias_tensor_ptr = ctx.GetInitializer(bias);
+      const auto* bias_dq = bias_tensor_ptr ? nullptr : ctx.GetProducer(bias);
+      if (bias_dq && bias_dq->op_type() == "DequantizeLinear" && bias_dq->input_size() > 1)
+        bias_tensor_ptr = ctx.GetInitializer(bias_dq->input(0));
+      else
+        bias_dq = nullptr;
       NEURON_RETURN_IF_NOT(bias_tensor_ptr != nullptr,
                             "QDQGemm: bias (", bias, ") must be a constant initializer");
       NEURON_RETURN_IF_NOT(bias_tensor_ptr->data_type() == onnx::TensorProto::INT32,
@@ -263,6 +278,26 @@ NeuronStatus GemmOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
 
       const void* bias_data = op_builder_helpers::GetRawInitializerData(*bias_tensor_ptr);
       NEURON_RETURN_IF_NOT(bias_data != nullptr, "QDQGemm: bias has no data");
+
+      // Neuron requires bias_scale == a_scale * b_scale.  A DQ'd bias with a
+      // different scale is requantized to it.
+      std::vector<int32_t> requantized_bias;
+      if (bias_dq) {
+        float dq_scale = 0.0f;
+        int32_t dq_zero_point = 0;
+        NEURON_RETURN_IF_ERROR(GetQuantizationScaleAndZeroPoint(
+            ctx, bias_dq->input(1), bias_dq->input_size() > 2 ? bias_dq->input(2) : std::string{},
+            dq_scale, dq_zero_point));
+        const float fc_scale = a_scale * b_scale;
+        if (dq_zero_point != 0 || std::fabs(dq_scale - fc_scale) > 1e-6f * std::fabs(fc_scale)) {
+          const auto* q = static_cast<const int32_t*>(bias_data);
+          requantized_bias.resize(ShapeSize(bias_dimen));
+          for (size_t i = 0; i < requantized_bias.size(); ++i)
+            requantized_bias[i] = static_cast<int32_t>(
+                std::lround((static_cast<double>(q[i]) - dq_zero_point) * dq_scale / fc_scale));
+          bias_data = requantized_bias.data();
+        }
+      }
 
       OperandType bias_operand_type(Type::TENSOR_INT32, bias_dimen, a_scale * b_scale);
       NEURON_RETURN_IF_ERROR(
