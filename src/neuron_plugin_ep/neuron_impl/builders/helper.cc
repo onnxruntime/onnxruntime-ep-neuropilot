@@ -274,6 +274,12 @@ ConvType GetConvType(const onnx::NodeProto& node, const NeuronGraphContext& ctx)
   if (node.input_size() >= 2) {
     const auto& weight_name = node.input(1);
     const auto* weight_tensor = ctx.GetInitializer(weight_name);
+    // QDQ Conv: the weight reaches the node through a DequantizeLinear.
+    if (!weight_tensor) {
+      const auto* dq = ctx.GetProducer(weight_name);
+      if (dq && dq->op_type() == "DequantizeLinear" && dq->input_size() > 0)
+        weight_tensor = ctx.GetInitializer(dq->input(0));
+    }
     if (weight_tensor && weight_tensor->dims_size() >= 2) {
       if (weight_tensor->dims(1) == 1) {
         return ConvType::Depthwise;
