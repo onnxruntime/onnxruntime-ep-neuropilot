@@ -31,6 +31,7 @@ NeuronStatus GeluOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
                                                     const NeuronGraphContext& ctx) const {
   auto& shaper(model_builder.GetShaper());
   const auto& operand_indices(model_builder.GetOperandIndices());
+  const auto& operand_types(model_builder.GetOperandTypes());
 
   const auto& input  = node.input(0);
   const auto& output = node.output(0);
@@ -41,7 +42,19 @@ NeuronStatus GeluOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   wrapper::OnnxDataTypeInfo output_io_info;
   output_io_info.onnx_data_type = elem_type;
 
-  const OperandType output_operand_type(output_io_info, shaper[output]);
+  OperandType output_operand_type(output_io_info, shaper[output]);
+
+  // For a QDQ Gelu (DQ→Gelu→Q) the input operand is already quant8 and the
+  // output must stay in that domain with the Q node's params.
+  const Type in_type = operand_types.at(input).type;
+  if (in_type == Type::TENSOR_QUANT8_ASYMM || in_type == Type::TENSOR_QUANT8_ASYMM_SIGNED) {
+    if (const auto* qdq = ctx.GetQDQGroup(output);
+        qdq && qdq->output_quant_params.has_value()) {
+      output_operand_type = OperandType(in_type, shaper[output],
+                                        qdq->output_quant_params->scale,
+                                        qdq->output_quant_params->zero_point);
+    }
+  }
 
   std::vector<uint32_t> input_indices;
   input_indices.push_back(operand_indices.at(input));
