@@ -1,0 +1,238 @@
+# CI for onnxruntime-ep-neuropilot
+#
+# Cross-compiles libonnxruntime_providers_neuropilot.so on an x86_64 runner,
+# once for aarch64 Linux (cmake/toolchain-aarch64.cmake) on two Debian base
+# images and once for Android arm64-v8a (cmake/toolchain-android.cmake); all
+# share the same job via the build matrix.
+#
+# The build needs two external inputs:
+#
+# 1. The prebuilt libneuron_op_capability.so, downloaded from the latest
+#    GitHub release of this repository. The release attaches one tarball per
+#    platform, e.g.
+#
+#      libneuron-op-capability-v0.1.0-linux-aarch64.tar.gz
+#      libneuron-op-capability-v0.1.0-android-arm64-v8a.tar.gz
+#
+#    Both Debian aarch64 jobs use the same linux-aarch64 tarball; the Android
+#    job uses the android-arm64-v8a one.
+#
+#      NEURON_OP_CAPABILITY_LIB_DIR  optional: pre-existing dir holding the
+#                                    .so, skips the download (local runs)
+#
+# 2. The public ONNX Runtime headers (onnxruntime_cxx_api.h,
+#    onnxruntime_ep_c_api.h, ...), sparse-checked out from the ORT repo.
+#
+#      ORT_REPO_URL     ORT git remote
+#      ORT_REF          ORT ref to check out
+#      ORT_INCLUDE_DIR  optional: pre-existing header dir, skips the checkout
+
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CMAKE_BUILD_TYPE: Release
+  # ONNX Runtime source providing the public headers
+  ORT_REPO_URL: "https://github.com/microsoft/onnxruntime.git"
+  ORT_REF: "v1.28.1"
+  # Android target; r27c == NDK 27.2.12479018
+  ANDROID_NDK_RELEASE: "r27c"
+  ANDROID_ABI: "arm64-v8a"
+  ANDROID_PLATFORM: "android-29"
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64
+            base_image: "debian:trixie"
+            artifact_platform: linux-aarch64
+            opcap_platform: linux-aarch64
+            # Base-image packages providing the cross toolchain.
+            target_packages: crossbuild-essential-arm64
+          - target: aarch64
+            base_image: "debian:bookworm"
+            artifact_platform: linux-aarch64
+            opcap_platform: linux-aarch64
+            target_packages: crossbuild-essential-arm64
+          # Android arm64-v8a. The base image only supplies host tools (cmake,
+          # ninja, host protoc), so a single one is enough; the NDK downloaded
+          # below brings its own clang and sysroot.
+          - target: android
+            base_image: "debian:trixie"
+            artifact_platform: android-arm64-v8a
+            opcap_platform: android-arm64-v8a
+            target_packages: ""
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.base_image }}
+    env:
+      TARGET: ${{ matrix.target }}
+      ARTIFACT_PLATFORM: ${{ matrix.artifact_platform }}
+      OPCAP_PLATFORM: ${{ matrix.opcap_platform }}
+      # FetchContent (ONNX/protobuf/GSL) + host-protoc caches
+      CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/deps
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            ${{ matrix.target_packages }} \
+            cmake \
+            ninja-build \
+            ccache \
+            git \
+            gh \
+            curl \
+            unzip \
+            ca-certificates \
+            python3 \
+            protobuf-compiler
+          cmake --version
+
+      - uses: actions/checkout@v7
+
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: .cache/ccache
+          key: ccache-${{ matrix.target }}-${{ matrix.base_image }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.target }}-${{ matrix.base_image }}-${{ github.ref_name }}-
+            ccache-${{ matrix.target }}-${{ matrix.base_image }}-
+
+      # cmake/toolchain-android.cmake reads ANDROID_NDK_HOME from the
+      # environment; ABI and platform are passed to CMake instead of left to
+      # its defaults. The NDK is re-downloaded per job rather than cached: the
+      # extracted tree is several GB, so a CI cache round-trip costs more than
+      # the download.
+      - name: Set up cross toolchain
+        run: |
+          if [ "$TARGET" = android ]; then
+            rm -rf "$GITHUB_WORKSPACE/.ndk"
+            curl --fail --silent --show-error --location \
+              --output "$GITHUB_WORKSPACE/ndk.zip" \
+              "https://dl.google.com/android/repository/android-ndk-$ANDROID_NDK_RELEASE-linux.zip"
+            unzip -q "$GITHUB_WORKSPACE/ndk.zip" -d "$GITHUB_WORKSPACE/.ndk"
+            rm -f "$GITHUB_WORKSPACE/ndk.zip"
+            ANDROID_NDK_HOME="$GITHUB_WORKSPACE/.ndk/android-ndk-$ANDROID_NDK_RELEASE"
+            ANDROID_TOOLCHAIN_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
+            echo "ANDROID_TOOLCHAIN_BIN=$ANDROID_TOOLCHAIN_BIN" >> "$GITHUB_ENV"
+            echo "ANDROID_CMAKE_ARGS=-DANDROID_ABI=$ANDROID_ABI -DANDROID_PLATFORM=$ANDROID_PLATFORM" >> "$GITHUB_ENV"
+            "$ANDROID_TOOLCHAIN_BIN/clang++" --version
+          else
+            aarch64-linux-gnu-g++ --version
+          fi
+
+      - name: Fetch prebuilt libneuron_op_capability.so
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${NEURON_OP_CAPABILITY_LIB_DIR:-}" ] && [ -d "$NEURON_OP_CAPABILITY_LIB_DIR" ]; then
+            echo "Using pre-provided NEURON_OP_CAPABILITY_LIB_DIR=$NEURON_OP_CAPABILITY_LIB_DIR"
+          else
+            rm -rf "$GITHUB_WORKSPACE/.opcap"
+            mkdir -p "$GITHUB_WORKSPACE/.opcap"
+            # Without an explicit tag, gh downloads from the latest release.
+            gh release download \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "libneuron-op-capability-*-$OPCAP_PLATFORM.tar.gz" \
+              --dir "$GITHUB_WORKSPACE/.opcap"
+            tarball=$(find "$GITHUB_WORKSPACE/.opcap" -name '*.tar.gz' -print -quit)
+            if [ -z "$tarball" ]; then
+              echo "ERROR: no libneuron_op_capability tarball for $OPCAP_PLATFORM in the latest release" >&2
+              exit 1
+            fi
+            echo "Using $(basename "$tarball")"
+            tar -xzf "$tarball" -C "$GITHUB_WORKSPACE/.opcap"
+            opcap_so=$(find "$GITHUB_WORKSPACE/.opcap" -name 'libneuron_op_capability.so' -print -quit)
+            if [ -z "$opcap_so" ]; then
+              echo "ERROR: libneuron_op_capability.so not found in the downloaded release asset" >&2
+              find "$GITHUB_WORKSPACE/.opcap" -type f >&2
+              exit 1
+            fi
+            NEURON_OP_CAPABILITY_LIB_DIR=$(dirname "$opcap_so")
+          fi
+          test -f "$NEURON_OP_CAPABILITY_LIB_DIR/libneuron_op_capability.so"
+          echo "NEURON_OP_CAPABILITY_LIB_DIR=$NEURON_OP_CAPABILITY_LIB_DIR" >> "$GITHUB_ENV"
+
+      - name: Fetch ONNX Runtime headers
+        run: |
+          if [ -n "${ORT_INCLUDE_DIR:-}" ] && [ -d "$ORT_INCLUDE_DIR" ]; then
+            echo "Using pre-provided ORT_INCLUDE_DIR=$ORT_INCLUDE_DIR"
+          else
+            # Blobless sparse checkout: only include/onnxruntime/core/session
+            # is materialised, the rest of the (large) ORT tree is never
+            # fetched.
+            rm -rf "$GITHUB_WORKSPACE/.ort-src"
+            git clone --depth 1 --filter=blob:none --sparse \
+              --branch "$ORT_REF" "$ORT_REPO_URL" "$GITHUB_WORKSPACE/.ort-src"
+            git -C "$GITHUB_WORKSPACE/.ort-src" sparse-checkout set \
+              include/onnxruntime/core/session
+            ORT_INCLUDE_DIR="$GITHUB_WORKSPACE/.ort-src/include/onnxruntime/core/session"
+          fi
+          test -f "$ORT_INCLUDE_DIR/onnxruntime_cxx_api.h"
+          echo "ORT_INCLUDE_DIR=$ORT_INCLUDE_DIR" >> "$GITHUB_ENV"
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B "build-$TARGET" -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/cmake/toolchain-$TARGET.cmake" \
+            -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
+            -DORT_INCLUDE_DIR="$ORT_INCLUDE_DIR" \
+            -DNEURON_OP_CAPABILITY_LIB_DIR="$NEURON_OP_CAPABILITY_LIB_DIR" \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/artifacts" \
+            -DORTNeuronEp_OBJECT_CACHE=ON \
+            ${ANDROID_CMAKE_ARGS:-}
+          cmake --build "build-$TARGET" --parallel "$(nproc)"
+          cmake --install "build-$TARGET"
+          ccache --show-stats || true
+
+      # Ship only the shared libraries, inside a directory named like the
+      # archive. Releases carry the exact tag in place of the build ID; dev
+      # builds carry run number (sortable) + commit sha.
+      - name: Package artifact
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            ARTIFACT_NAME="onnxruntime-ep-neuropilot-$GITHUB_REF_NAME-$ARTIFACT_PLATFORM"
+          else
+            ARTIFACT_NAME="onnxruntime-ep-neuropilot-$GITHUB_RUN_NUMBER-$(echo "$GITHUB_SHA" | cut -c1-8)-$ARTIFACT_PLATFORM"
+          fi
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
+          rm -rf "$GITHUB_WORKSPACE/$ARTIFACT_NAME"
+          mkdir -p "$GITHUB_WORKSPACE/$ARTIFACT_NAME"
+          for so_name in libonnxruntime_providers_neuropilot.so libneuron_op_capability.so; do
+            so_path=$(find "$GITHUB_WORKSPACE/artifacts" -name "$so_name" -print -quit)
+            if [ -z "$so_path" ]; then
+              echo "ERROR: $so_name not found in the install tree" >&2
+              exit 1
+            fi
+            cp "$so_path" "$GITHUB_WORKSPACE/$ARTIFACT_NAME/$so_name"
+            # The NDK compiles with -g regardless of the build type.
+            if [ "$TARGET" = android ]; then
+              "$ANDROID_TOOLCHAIN_BIN/llvm-strip" --strip-unneeded "$GITHUB_WORKSPACE/$ARTIFACT_NAME/$so_name"
+            fi
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          # The base-image suffix keeps the two linux-aarch64 uploads distinct.
+          name: ${{ env.ARTIFACT_NAME }}-${{ matrix.base_image == 'debian:bookworm' && 'bookworm' || 'trixie' }}
+          path: ${{ env.ARTIFACT_NAME }}/
+          if-no-files-found: error
+          retention-days: 90
