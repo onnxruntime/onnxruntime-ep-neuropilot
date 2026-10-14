@@ -1,11 +1,9 @@
-# onnxruntime-ep-neuropilot
+# MediaTek NeuroPilot Plugin Execution Provider
 
-The **MediaTek Neuron plugin execution provider** for ONNX Runtime. Builds
-`libonnxruntime_providers_neuropilot.so`, a plugin EP that ORT loads at runtime to offload
-supported subgraphs to the Neuron NPU.
+**MediaTek NeuroPilot plugin execution provider** for ONNX Runtime (ORT). It enables hardware acceleration by offloading supported subgraphs to the MediaTek NPU. The build produces `libonnxruntime_providers_neuropilot.so`, which ORT loads at runtime.
 
-The per-operator support-check logic is consumed as a prebuilt closed-source shared
-library, `libneuron_op_capability.so`, which this EP `dlopen`s at runtime. The prebuilt
+The per-operator support-check logic is a prebuilt, closed-source shared library,
+`libneuron_op_capability.so`, which this EP loads at runtime with `dlopen`. The prebuilt
 library is available from the GitHub release page.
 
 ---
@@ -17,6 +15,7 @@ library is available from the GitHub release page.
 - ORT public headers (the directory containing `onnxruntime_cxx_api.h`,
   e.g. `<ort-src>/include/onnxruntime/core/session`). No `libonnxruntime.so` is needed — the
   EP is `dlopen`ed by ORT, so its symbols resolve at runtime.
+- CMake 3.25+ and a C++17 compiler.
 - protobuf / ONNX / GSL are fetched automatically.
 
 ---
@@ -46,7 +45,7 @@ cmake -S . -B build \
 cmake --build build -j
 ```
 
-Cross-compiling — add the toolchain file for the target. Codegen needs a
+To **cross-compile**, add the toolchain file for the target. Codegen needs a
 **host** protoc (a target-architecture one cannot run on the build machine); it is resolved
 automatically.
 
@@ -64,10 +63,10 @@ cmake -S . -B build-android -G Ninja \
   -DORT_INCLUDE_DIR=... -DNEURON_OP_CAPABILITY_LIB_DIR=...
 ```
 
-A `protoc` on `PATH` is used when it is exactly the version of the
-protobuf runtime this library links — otherwise a matching host protoc is built from source.
-Pin a specific one with `-DPROTOBUF_PROTOC_EXECUTABLE=/path/to/protoc`; a version mismatch
-will result in an error.
+A `protoc` on `PATH` is used only if its version exactly matches the protobuf runtime this
+library links; otherwise a matching host `protoc` is built from source. Pin a specific one
+with `-DPROTOBUF_PROTOC_EXECUTABLE=/path/to/protoc`; if a pinned `protoc` has the wrong
+version, configuration fails.
 
 Key CMake options:
 
@@ -100,15 +99,16 @@ libneuron_op_capability.so
 ```
 
 Register the EP with ORT (`register_execution_provider_library` / the plugin EP API). On
-init the EP `dlopen`s `libneuron_op_capability.so`; if it is absent, EP creation fails with a
-clear error.
+init the EP loads `libneuron_op_capability.so`; if it cannot be loaded, EP creation fails with
+an error.
 
 On Android, push both plus an Android `libonnxruntime.so` to the device and set
 `LD_LIBRARY_PATH` to that directory; the EP resolves `libneuron_op_capability.so` **by name**
-through the normal loader search path. Real NPU execution also needs the on-device MediaTek
+through the normal loader search path. Running on the NPU also needs the on-device MediaTek
 Neuron runtime (`libneuronusdk_adapter.mtk.so`).
 
-The NDK builds with `-g`, so the Android `.so` files are tens of MB. Strip before shipping:
+Android builds include debug symbols (`-g`), so the `.so` files are tens of MB. Strip before
+shipping (path shown for a Linux host):
 
 ```bash
 $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip \
@@ -136,3 +136,8 @@ onnxruntime-ep-neuropilot/
         ├── neuron_graph_context.{cc,h}    graph/context accessors
         └── ...
 ```
+
+---
+## License
+
+This project is licensed under MIT. See [LICENSE](LICENSE) for details.
