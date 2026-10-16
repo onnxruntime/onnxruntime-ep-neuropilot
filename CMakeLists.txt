@@ -441,6 +441,42 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
   endif()
 
   add_test(NAME graph_payload_elision COMMAND graph_payload_elision_test)
+
+  # Measurement tool, not a test: needs a model argument, so not registered
+  # with CTest.
+  set(CAP_PEAK_PROBE_SOURCES
+    "${PROJECT_SOURCE_DIR}/test/cap_peak_probe.cc"
+    "${NEURON_IMPL_DIR}/neuron_impl/op_capability_abi/op_capability_loader.cc"
+  )
+
+  # Optional so the probe also builds at pre-elision revisions.
+  set(CAP_PEAK_PROBE_ELISION
+    "${NEURON_IMPL_DIR}/neuron_impl/op_capability_abi/graph_payload_elision.cc")
+  if(EXISTS "${CAP_PEAK_PROBE_ELISION}")
+    list(APPEND CAP_PEAK_PROBE_SOURCES "${CAP_PEAK_PROBE_ELISION}")
+  endif()
+
+  add_executable(cap_peak_probe ${CAP_PEAK_PROBE_SOURCES})
+
+  target_compile_definitions(cap_peak_probe PRIVATE
+    ONNX_NAMESPACE=onnx
+    ONNX_ML=1
+  )
+
+  target_include_directories(cap_peak_probe PRIVATE
+    "${NEURON_IMPL_DIR}/neuron_impl"
+    "${ONNX_SRC_DIR}"
+  )
+
+  target_link_libraries(cap_peak_probe PRIVATE
+    protobuf::libprotobuf
+    onnx
+    ${CMAKE_DL_LIBS}
+  )
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(cap_peak_probe PRIVATE -Wall -Wextra)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------
