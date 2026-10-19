@@ -86,9 +86,18 @@ endif()
 include(FetchContent)
 include("${CMAKE_SOURCE_DIR}/cmake/onnxruntime_library_utils.cmake")
 
+# Minimum supported ONNX Runtime release.  The patch level cannot be seen from
+# the headers (ORT_API_VERSION only tracks the minor), so it is enforced on the
+# version we download and documented for user-supplied ORT trees.
+set(ORTNeuronEp_MIN_ORT_VERSION "1.24.1")
+string(REGEX REPLACE "^[0-9]+\\.([0-9]+)\\..*$" "\\1" ORTNeuronEp_MIN_ORT_API_VERSION
+       "${ORTNeuronEp_MIN_ORT_VERSION}")
+
 # ---------------------------------------------------------------------------
 # ORT include / library paths
 # ---------------------------------------------------------------------------
+set(ORTNeuronEp_DEFAULT_ORT_VERSION "1.26.0" CACHE STRING
+    "ORT version downloaded when ORT_HOME is given (must be >= ORTNeuronEp_MIN_ORT_VERSION)")
 # ORT_LIBRARY_DIR is optional: the plugin EP is loaded at runtime by ORT
 # (via dlopen), so libonnxruntime.so is already in memory and its symbols
 # are available without link-time linkage.  Providing ORT_LIBRARY_DIR lets
@@ -102,14 +111,31 @@ if(DEFINED ORT_INCLUDE_DIR)
   endif()
   message(STATUS "Using explicit ORT include dir (standalone build)")
 elseif(DEFINED ORT_HOME AND ORT_HOME)
+  if(ORTNeuronEp_DEFAULT_ORT_VERSION VERSION_LESS ORTNeuronEp_MIN_ORT_VERSION)
+    message(FATAL_ERROR "ORTNeuronEp_DEFAULT_ORT_VERSION (${ORTNeuronEp_DEFAULT_ORT_VERSION}) "
+                        "is older than the minimum supported ORT ${ORTNeuronEp_MIN_ORT_VERSION}.")
+  endif()
   set_onnxruntime_paths(
     ORT_HOME            "${ORT_HOME}"
-    DEFAULT_ORT_VERSION "1.26.0"
+    DEFAULT_ORT_VERSION "${ORTNeuronEp_DEFAULT_ORT_VERSION}"
     ORT_INCLUDE_DIR_VAR ORT_INCLUDE_DIR
     ORT_LIBRARY_DIR_VAR ORT_LIBRARY_DIR
   )
 else()
   message(FATAL_ERROR "Set ORT_INCLUDE_DIR (required) and optionally ORT_LIBRARY_DIR.")
+endif()
+
+# Reject headers older than the minimum ORT release.
+set(_ort_c_api_header "${ORT_INCLUDE_DIR}/onnxruntime_c_api.h")
+if(NOT EXISTS "${_ort_c_api_header}")
+  message(FATAL_ERROR "onnxruntime_c_api.h not found in ORT_INCLUDE_DIR='${ORT_INCLUDE_DIR}'.")
+endif()
+file(STRINGS "${_ort_c_api_header}" _ort_api_line REGEX "^#define ORT_API_VERSION [0-9]+")
+string(REGEX REPLACE "^#define ORT_API_VERSION ([0-9]+).*" "\\1" ORT_HEADER_API_VERSION "${_ort_api_line}")
+if(NOT ORT_HEADER_API_VERSION OR ORT_HEADER_API_VERSION LESS ORTNeuronEp_MIN_ORT_API_VERSION)
+  message(FATAL_ERROR "ORT headers in '${ORT_INCLUDE_DIR}' have ORT_API_VERSION='${ORT_HEADER_API_VERSION}'; "
+                      "ONNX Runtime >= ${ORTNeuronEp_MIN_ORT_VERSION} "
+                      "(API version ${ORTNeuronEp_MIN_ORT_API_VERSION}) is required.")
 endif()
 message(STATUS "ORT_INCLUDE_DIR : ${ORT_INCLUDE_DIR}")
 message(STATUS "ORT_LIBRARY_DIR : ${ORT_LIBRARY_DIR}")
@@ -302,6 +328,8 @@ target_compile_definitions(onnxruntime_providers_neuron PRIVATE
   ONNX_NAMESPACE=onnx
   ONNX_ML=1
   NOMINMAX
+  # Oldest ORT API version this EP loads against (from ORTNeuronEp_MIN_ORT_VERSION).
+  ORT_NEURON_EP_MIN_ORT_API_VERSION=${ORTNeuronEp_MIN_ORT_API_VERSION}
   # Release version of this EP, reported to ORT via OrtEpFactory::GetVersion.
   # Defined by CMake via project(... VERSION ...) above.
   ORT_NEURON_EP_VERSION="${PROJECT_VERSION}"

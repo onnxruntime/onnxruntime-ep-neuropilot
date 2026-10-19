@@ -37,9 +37,7 @@ NeuronEpFactory::NeuronEpFactory(ApiPtrs apis, const OrtLogger& default_logger,
   IsStreamAware                           = IsStreamAwareImpl;
   CreateSyncStreamForDevice               = CreateSyncStreamForDeviceImpl;
 
-  if (ort_api_version >= 24) {
-    GetHardwareDeviceIncompatibilityDetails = GetHardwareDeviceIncompatibilityDetailsImpl;
-  }
+  GetHardwareDeviceIncompatibilityDetails = GetHardwareDeviceIncompatibilityDetailsImpl;
 
   // Neuron EP uses CPU-accessible memory.
   // The MediaTek NPU reads/writes via the same CPU address space; no separate

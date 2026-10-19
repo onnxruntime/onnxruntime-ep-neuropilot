@@ -12,6 +12,7 @@ library is available from the GitHub release page.
 
 - The prebuilt **`libneuron_op_capability.so`**, downloadable from the GitHub release page.
   This EP **requires** it at configure time.
+- ONNX Runtime >= 1.24.1.
 - ORT public headers (the directory containing `onnxruntime_cxx_api.h`,
   e.g. `<ort-src>/include/onnxruntime/core/session`). No `libonnxruntime.so` is needed — the
   EP is `dlopen`ed by ORT, so its symbols resolve at runtime.
