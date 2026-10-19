@@ -19,8 +19,9 @@
 // dynamic symbol table.  Everything else stays hidden.
 #define EXPORT_SYMBOL __attribute__((visibility("default")))
 
-// oldest ORT we can run against; the plugin EP surface we use landed in 1.23
-static constexpr uint32_t kMinSupportedOrtApiVersion = 23;
+// oldest ORT API version we can run against; set by CMake from
+// ORTNeuronEp_MIN_ORT_VERSION (1.24.1 -> API 24)
+static constexpr uint32_t kMinSupportedOrtApiVersion = ORT_NEURON_EP_MIN_ORT_API_VERSION;
 
 extern "C" {
 
