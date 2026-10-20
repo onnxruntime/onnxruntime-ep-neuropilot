@@ -116,6 +116,26 @@ $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip \
   --strip-unneeded build-android/libonnxruntime_providers_neuropilot.so
 ```
 
+### Passing dma-buf buffers to the NPU without a copy
+
+By default the EP hands the Neuron runtime the host pointer of each ORT tensor, and the runtime
+stages a copy. ORT's C API cannot pass a file descriptor with a tensor, so a dma-buf backed buffer
+(for example a V4L2 or MDP3 capture buffer) is registered with the EP once, and its mapped
+pointer is then used as an ordinary tensor:
+
+```c
+// exported by libonnxruntime_providers_neuropilot.so
+int  NeuronEp_RegisterDmabuf(const void* host_ptr, size_t size, int fd);   // 0 on success
+void NeuronEp_UnregisterDmabuf(const void* host_ptr);
+```
+
+When an input or output tensor's data pointer lies inside a registered range, the EP binds it with
+`NeuronExecution_setInputFromMemory` / `setOutputFromMemory` (a `NeuronMemory` is created once per
+registration with `NeuronMemory_createFromFd`). Other tensors take the unchanged host-pointer path.
+The `fd` must stay open and the buffer mapped until `NeuronEp_UnregisterDmabuf()` returns, and no
+`Run()` may use the buffer while it is being unregistered. Find the functions with `dlsym` on the
+already loaded library.
+
 ---
 
 ## Repository Layout
