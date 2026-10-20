@@ -189,6 +189,10 @@ class Execution {
   // Fast path: pass nullptr for operandType (use compiled type) and pre-computed sizes.
   NeuronStatus SetInputFast(int32_t index, const void* buffer, size_t byte_size);
   NeuronStatus SetOutputFast(int32_t index, void* buffer, size_t byte_size);
+  // Same, but the buffer is a registered dmabuf (see neuron_dmabuf.h): the NPU
+  // reads/writes it directly instead of through a staged copy.
+  NeuronStatus SetInputFromMemory(int32_t index, const NeuronMemory* memory, size_t offset, size_t byte_size);
+  NeuronStatus SetOutputFromMemory(int32_t index, const NeuronMemory* memory, size_t offset, size_t byte_size);
   NeuronStatus Predict();
 
  private:
