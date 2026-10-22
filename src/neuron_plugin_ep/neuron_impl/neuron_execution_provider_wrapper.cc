@@ -111,6 +111,11 @@ struct NeuronWrapperState {
   // NEURON_FLAG_SKIP_CAPABILITY_PROBE; trades CPU fallback for partitioning speed
   bool skip_capability_probe{false};
 
+  // Whether this Neuron stack can build an MDLA QuantizeLayer from a float
+  // input; a device property probed once on first use (-1 = not yet known).
+  // mutable: cached lazily during GetCapability, which sees const state.
+  mutable int mdla_float_quantize{-1};
+
   // Neuron SDK handle.
   const NeuronApi* neuron_handle{nullptr};
   NeuronRuntimeVersion neuron_version{1, 0, 0};
@@ -1143,10 +1148,73 @@ static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
 
   if (state->skip_capability_probe || groups.empty()) return groups;
 
+  const auto probe_compiles = [&](const std::vector<int>& group,
+                                  std::string& reason) -> bool {
+    onnx::GraphProto sub;
+    ExtractSubgraphProto(graph_proto, group, ctx, sub);
+    try {
+      onnxruntime::neuron::NeuronGraphContext sub_ctx(sub);
+      onnxruntime::neuron::ModelBuilder probe(
+          sub_ctx,
+          *state->neuron_handle,
+          state->neuron_version,
+          state->neuron_target_devices,
+          state->target_device_option,
+          state->optimization_string);
+      probe.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
+      probe.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+
+      NeuronStatus ns = probe.ValidateDeviceSupport();
+      if (!ns.IsOK()) {
+        reason = ns.ErrorMessage();
+        return false;
+      }
+      return true;
+    } catch (const std::exception& e) {
+      reason = std::string("exception: ") + e.what();
+      return false;
+    }
+  };
+
   std::vector<std::vector<int>> kept;
   kept.reserve(groups.size());
 
   for (auto& group : groups) {
+    {
+      std::unordered_set<std::string> produced;
+      for (int idx : group)
+        for (const auto& o : graph_proto.node(idx).output())
+          if (!o.empty()) produced.insert(o);
+
+      std::vector<int> boundary_q;
+      for (int idx : group) {
+        const auto& n = graph_proto.node(idx);
+        if (n.op_type() != "QuantizeLinear" || n.input_size() == 0) continue;
+        const std::string& src = n.input(0);
+        if (produced.count(src)) continue;
+        if (ctx.GetElementType(src) == onnx::TensorProto::FLOAT)
+          boundary_q.push_back(idx);
+      }
+      if (!boundary_q.empty()) {
+        if (state->mdla_float_quantize < 0) {
+          std::string reason;
+          state->mdla_float_quantize =
+              probe_compiles({boundary_q.front()}, reason) ? 1 : 0;
+          if (state->mdla_float_quantize == 0)
+            LOGS_NEURON(INFO) << "This Neuron stack cannot quantize a float "
+                              << "input on the MDLA (" << reason << "); "
+                              << "boundary QuantizeLinear nodes will run on CPU.";
+        }
+        if (state->mdla_float_quantize == 0) {
+          const std::unordered_set<int> drop(boundary_q.begin(), boundary_q.end());
+          group.erase(std::remove_if(group.begin(), group.end(),
+                                     [&](int idx) { return drop.count(idx) != 0; }),
+                      group.end());
+          if (group.empty()) continue;
+        }
+      }
+    }
+
     const auto& layout_sensitive = LayoutSensitiveOps();
     bool probe_would_be_stale = false;
     for (int idx : group) {
@@ -1163,30 +1231,9 @@ static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
       continue;
     }
 
-    onnx::GraphProto sub;
-    ExtractSubgraphProto(graph_proto, group, ctx, sub);
-
     bool ok = false;
     std::string reason;
-    try {
-      onnxruntime::neuron::NeuronGraphContext sub_ctx(sub);
-      onnxruntime::neuron::ModelBuilder probe(
-          sub_ctx,
-          *state->neuron_handle,
-          state->neuron_version,
-          state->neuron_target_devices,
-          state->target_device_option,
-          state->optimization_string);
-      probe.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
-      probe.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
-
-      NeuronStatus ns = probe.ValidateDeviceSupport();
-      ok = ns.IsOK();
-      if (!ok) reason = ns.ErrorMessage();
-    } catch (const std::exception& e) {
-      ok = false;
-      reason = std::string("exception: ") + e.what();
-    }
+    ok = probe_compiles(group, reason);
 
     if (ok) {
       kept.push_back(std::move(group));
