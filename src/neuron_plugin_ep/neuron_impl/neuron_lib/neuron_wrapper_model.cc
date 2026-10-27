@@ -219,6 +219,20 @@ NeuronStatus Execution::SetOutputFast(int32_t index, void* buffer, size_t byte_s
   return NeuronStatus::OK();
 }
 
+NeuronStatus Execution::SetInputFromMemory(int32_t index, const NeuronMemory* memory, size_t offset,
+                                           size_t byte_size) {
+  NEURON_RETURN_STATUS_ON_ERROR(neuron_.NeuronExecution_setInputFromMemory(
+      execution_, static_cast<uint32_t>(index), nullptr, memory, offset, byte_size));
+  return NeuronStatus::OK();
+}
+
+NeuronStatus Execution::SetOutputFromMemory(int32_t index, const NeuronMemory* memory, size_t offset,
+                                            size_t byte_size) {
+  NEURON_RETURN_STATUS_ON_ERROR(neuron_.NeuronExecution_setOutputFromMemory(
+      execution_, static_cast<uint32_t>(index), nullptr, memory, offset, byte_size));
+  return NeuronStatus::OK();
+}
+
 // The Neuron API splits its failure codes into TRANSIENT and PERSISTENT pairs.
 // TODO: try to understand what this means.
 static bool IsTransientNeuronError(int code) {

@@ -53,6 +53,7 @@
 #include "builders/onnx_ctx_model_helper.h"
 #include "builders/op_builder.h"
 #include "builders/op_builder_factory.h"
+#include "neuron_lib/neuron_dmabuf.h"
 #include "neuron_lib/neuron_implementation.h"
 #include "neuron_lib/neuron_wrapper_device.h"
 #include "op_capability_abi/op_capability_loader.h"
@@ -324,7 +325,11 @@ struct NeuronNodeComputeInfo : OrtNodeComputeInfo {
       const void* buf = (info.synth_kind >= 0)
                             ? static_cast<const void*>(cs->synth_buffers[i].data())
                             : ctx.GetInput(info.ort_idx).GetTensorRawData();
-      auto ns = cs->execution->SetInputFast(static_cast<int32_t>(i), buf, info.byte_size);
+      const NeuronMemory* shm = nullptr;
+      size_t shm_off = 0;
+      auto ns = neuron::dmabuf::Lookup(buf, info.byte_size, &shm, &shm_off)
+                    ? cs->execution->SetInputFromMemory(static_cast<int32_t>(i), shm, shm_off, info.byte_size)
+                    : cs->execution->SetInputFast(static_cast<int32_t>(i), buf, info.byte_size);
       if (!ns.IsOK())
         return self->ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
     }
@@ -338,8 +343,11 @@ struct NeuronNodeComputeInfo : OrtNodeComputeInfo {
       // GetTensorMutableData<uint8_t>() is a type-agnostic raw-pointer accessor;
       // the template parameter is irrelevant — the underlying C API returns void*.
       void* buf = ort_out.GetTensorMutableData<uint8_t>();
-      auto ns = cs->execution->SetOutputFast(
-          static_cast<int32_t>(i), buf, info.byte_size);
+      const NeuronMemory* shm = nullptr;
+      size_t shm_off = 0;
+      auto ns = neuron::dmabuf::Lookup(buf, info.byte_size, &shm, &shm_off)
+                    ? cs->execution->SetOutputFromMemory(static_cast<int32_t>(i), shm, shm_off, info.byte_size)
+                    : cs->execution->SetOutputFast(static_cast<int32_t>(i), buf, info.byte_size);
       if (!ns.IsOK())
         return self->ort_api->CreateStatus(ORT_EP_FAIL, ns.ErrorMessage().c_str());
     }
