@@ -18,6 +18,9 @@ namespace op_capability {
 
 namespace {
 
+// Lives in the EP's .so, so dladdr can let us know where that file is.
+const int kAnchorInEpLibrary = 0;
+
 // Logs which symbol is missing, not just that one was.
 template <typename Fn>
 bool ResolveSymbol(void* handle, const char* name, Fn& out) {
@@ -52,7 +55,18 @@ OpCapabilityLoader::~OpCapabilityLoader() {
 }
 
 void OpCapabilityLoader::LoadLibrary() {
-  lib_handle_ = dlopen(NEURON_CAP_LIBRARY_NAME, RTLD_NOW | RTLD_LOCAL);
+  Dl_info info;
+  if (dladdr(&kAnchorInEpLibrary, &info) && info.dli_fname && *info.dli_fname) {
+    std::string sibling(info.dli_fname);
+    const auto slash = sibling.find_last_of('/');
+    if (slash != std::string::npos) {
+      sibling.resize(slash + 1);
+      sibling += NEURON_CAP_LIBRARY_NAME;
+      lib_handle_ = dlopen(sibling.c_str(), RTLD_NOW | RTLD_LOCAL);
+    }
+  }
+  if (!lib_handle_)
+    lib_handle_ = dlopen(NEURON_CAP_LIBRARY_NAME, RTLD_NOW | RTLD_LOCAL);
   if (!lib_handle_) {
     LOGS_NEURON(WARNING) << "Could not load " << NEURON_CAP_LIBRARY_NAME << ": " << dlerror();
     return;
