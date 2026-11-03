@@ -49,6 +49,7 @@ NeuronEp::NeuronEp(NeuronEpFactory& factory,
   ShouldConvertDataLayoutForOp = ShouldConvertDataLayoutForOpImpl;
   CreateAllocator              = CreateAllocatorImpl;
   CreateSyncStreamForDevice    = CreateSyncStreamForDeviceImpl;
+  IsConcurrentRunSupported     = IsConcurrentRunSupportedImpl;
 
   // Optional callbacks newer than the oldest ORT we load into: set only when the
   // headers declare them and the negotiated runtime version provides them.
@@ -239,5 +240,17 @@ OrtStatus* ORT_API_CALL NeuronEp::OnSessionInitializationEndImpl(OrtEp* ep_ptr) 
   if (ep.neuron_handle_) {
     NeuronWrapper_OnSessionInitializationEnd(ep.neuron_handle_);
   }
+  return nullptr;
+}
+
+// ---- IsConcurrentRunSupported (ORT >= 1.24) ---------------------------------
+// A compiled node keeps one NeuronExecution and its input/output state per
+// session, so two threads calling Run() on the same session would use it at
+// once.  Say so, and ORT serializes the runs with its own lock.  (Separate
+// sessions are independent and may run in parallel.)
+/*static*/
+OrtStatus* ORT_API_CALL NeuronEp::IsConcurrentRunSupportedImpl(OrtEp* /*ep*/,
+                                                                bool* is_supported) noexcept {
+  *is_supported = false;
   return nullptr;
 }
