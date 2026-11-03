@@ -10,6 +10,7 @@
 
 #include "neuron_ep_factory.h"
 #include "neuron_ep_stream_support.h"
+#include "neuron_ep_version.h"
 
 // ===========================================================================
 // NeuronEp
@@ -48,6 +49,12 @@ NeuronEp::NeuronEp(NeuronEpFactory& factory,
   ShouldConvertDataLayoutForOp = ShouldConvertDataLayoutForOpImpl;
   CreateAllocator              = CreateAllocatorImpl;
   CreateSyncStreamForDevice    = CreateSyncStreamForDeviceImpl;
+
+  // Optional callbacks newer than the oldest ORT we load into: set only when the
+  // headers declare them and the negotiated runtime version provides them.
+  OrtVersionGate<27>(ort_api_version, static_cast<OrtEp*>(this), [](auto* ep) {
+    ep->OnSessionInitializationEnd = OnSessionInitializationEndImpl;
+  });
 
   IGNORE_ORTSTATUS(ort_api.Logger_LogMessage(
       &logger_, ORT_LOGGING_LEVEL_INFO,
@@ -216,5 +223,21 @@ OrtStatus* ORT_API_CALL NeuronEp::CreateSyncStreamForDeviceImpl(
 
   auto s = std::make_unique<NeuronStreamImpl>(ep.factory_, nullptr);
   *stream = s.release();
+  return nullptr;
+}
+
+// ---- OnSessionInitializationEnd (ORT >= 1.27) -------------------------------
+// Called once after all nodes are compiled.  Lets the wrapper drop temporary
+// compile-time memory so a long-lived session does not keep it resident.
+/*static*/
+OrtStatus* ORT_API_CALL NeuronEp::OnSessionInitializationEndImpl(OrtEp* ep_ptr) noexcept {
+  auto& ep = *static_cast<NeuronEp*>(ep_ptr);
+  IGNORE_ORTSTATUS(ep.ort_api.Logger_LogMessage(
+      &ep.logger_, ORT_LOGGING_LEVEL_INFO,
+      "NeuronEP: OnSessionInitializationEnd",
+      ORT_FILE, __LINE__, __FUNCTION__));
+  if (ep.neuron_handle_) {
+    NeuronWrapper_OnSessionInitializationEnd(ep.neuron_handle_);
+  }
   return nullptr;
 }
