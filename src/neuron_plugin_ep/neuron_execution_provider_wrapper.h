@@ -101,6 +101,10 @@ void NeuronWrapper_ReleaseNodeComputeInfos(
 // Returns the OrtEpDataLayout value the EP prefers.
 //   0 = OrtEpDataLayout_NCHW (default)
 //   1 = OrtEpDataLayout_NHWC
+// Called from OrtEp::OnSessionInitializationEnd (ORT >= 1.27): releases memory
+// that was only needed while compiling.
+void NeuronWrapper_OnSessionInitializationEnd(NeuronWrapperHandle handle);
+
 int NeuronWrapper_GetPreferredLayout(NeuronWrapperHandle handle);
 
 // Returns 1 if layout conversion should be SKIPPED for this op, 0 otherwise.

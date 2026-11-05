@@ -18,6 +18,9 @@
 //   There is NO reinterpret_cast to internal ORT types anywhere.
 
 #define ORT_EP_UTILS_ORT_GRAPH_TO_PROTO_IMPL
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <malloc.h>
+#endif
 #include "ort_graph_to_proto.h"   // header-only utility – copy from TRT EP
 
 #define ORT_API_MANUAL_INIT
@@ -1693,6 +1696,17 @@ void NeuronWrapper_ReleaseNodeComputeInfos(
   for (size_t i = 0; i < count; ++i) {
     delete static_cast<NeuronNodeComputeInfo*>(node_compute_infos[i]);
   }
+}
+
+// ---------------------------------------------------------------------------
+// NeuronWrapper_OnSessionInitializationEnd
+// ---------------------------------------------------------------------------
+void NeuronWrapper_OnSessionInitializationEnd(NeuronWrapperHandle /*handle*/) {
+#if defined(__linux__) && !defined(__ANDROID__)
+  // glibc only (Android's libc has no malloc_trim).  Compilation allocates and frees large temporary buffers; give the freed heap
+  // back to the OS so the session's resident size reflects what inference needs.
+  malloc_trim(0);
+#endif
 }
 
 // ---------------------------------------------------------------------------

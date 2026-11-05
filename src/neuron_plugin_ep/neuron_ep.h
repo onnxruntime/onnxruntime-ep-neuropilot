@@ -74,6 +74,9 @@ class NeuronEp : public OrtEp, public ApiPtrs {
       const OrtMemoryDevice* memory_device,
       OrtSyncStreamImpl** stream) noexcept;
 
+  // ORT >= 1.27
+  static OrtStatus* ORT_API_CALL OnSessionInitializationEndImpl(OrtEp* ep) noexcept;
+
   // ---- Per-session state --------------------------------------------------
   NeuronEpFactory&    factory_;
   std::string         name_;
