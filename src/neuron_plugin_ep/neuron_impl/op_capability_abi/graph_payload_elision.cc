@@ -2,6 +2,8 @@
 
 #include "graph_payload_elision.h"
 
+#include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace onnxruntime {
@@ -91,7 +93,18 @@ void ElidedInitializerPayloads::VisitTensor(onnx::TensorProto& tensor) {
 }
 
 void ElidedInitializerPayloads::VisitGraph(onnx::GraphProto& graph) {
+  // Don't elide Q/DQ scale and zero-point values
+  std::unordered_set<std::string> quant_params;
+  for (const auto& node : graph.node()) {
+    if (node.op_type() != "DequantizeLinear" && node.op_type() != "QuantizeLinear")
+      continue;
+    for (int i = 1; i < node.input_size() && i <= 2; ++i) {
+      if (!node.input(i).empty()) quant_params.insert(node.input(i));
+    }
+  }
+
   for (auto& init : *graph.mutable_initializer()) {
+    if (quant_params.count(init.name()) != 0) continue;
     VisitTensor(init);
   }
 
