@@ -111,6 +111,13 @@ NeuronStatus UnaryOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
     y_scale = 1.f / 256;
     y_zero_point =
         (input_operand_type == Type::TENSOR_QUANT8_ASYMM_SIGNED) ? -128 : 0;
+  } else if (output_is_quantized) {
+    // the other ops take their output's parameters from the QDQ group
+    const auto* qdq = ctx.GetQDQGroup(output);
+    NEURON_RETURN_IF_NOT(qdq != nullptr && qdq->output_quant_params.has_value(),
+                         "UnaryOpBuilder: no output quantization for '", output, "'");
+    y_scale = qdq->output_quant_params->scale;
+    y_zero_point = qdq->output_quant_params->zero_point;
   }
 
   std::vector<uint32_t> input_indices;
