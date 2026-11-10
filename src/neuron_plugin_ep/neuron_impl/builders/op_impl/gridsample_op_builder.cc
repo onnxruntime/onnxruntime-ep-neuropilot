@@ -129,6 +129,8 @@ class GridSampleOpBuilder : public BaseOpBuilder {
   // a GridSample partition is worth its own NPU dispatch
   bool IsComputeHeavy(const onnx::NodeProto& /*node*/) const override { return true; }
 
+  // not every 8.x runtime maps the MTKEXT op, and it needs an MVPU
+  bool RequiresRuntimeProbe(const onnx::NodeProto& /*node*/) const override { return true; }
 };
 
 // ---------------------------------------------------------------------------

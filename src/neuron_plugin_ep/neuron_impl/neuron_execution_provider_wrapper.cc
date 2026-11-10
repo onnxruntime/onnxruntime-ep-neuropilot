@@ -615,6 +615,40 @@ static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
   return out;
 }
 
+static void ExtractSubgraphProto(const onnx::GraphProto& parent,
+                                 const std::vector<int>& node_indices,
+                                 const onnxruntime::neuron::NeuronGraphContext& parent_ctx,
+                                 onnx::GraphProto& out);
+
+// Builds `node_index` as a single-node Neuron model and asks the target
+// devices whether they support it.
+static bool RuntimeProbeSupportsNode(const onnx::GraphProto& graph_proto,
+                                     const onnxruntime::neuron::NeuronGraphContext& ctx,
+                                     int node_index,
+                                     const NeuronWrapperState* state,
+                                     std::string& reason) {
+  onnx::GraphProto sub;
+  ExtractSubgraphProto(graph_proto, {node_index}, ctx, sub);
+  try {
+    onnxruntime::neuron::NeuronGraphContext sub_ctx(sub);
+    onnxruntime::neuron::ModelBuilder probe(
+        sub_ctx,
+        *state->neuron_handle,
+        state->neuron_version,
+        state->neuron_target_devices,
+        state->target_device_option,
+        state->optimization_string);
+    probe.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
+    probe.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+    NeuronStatus ns = probe.ValidateDeviceSupport();
+    if (!ns.IsOK()) { reason = ns.ErrorMessage(); return false; }
+    return true;
+  } catch (const std::exception& e) {
+    reason = std::string("exception: ") + e.what();
+    return false;
+  }
+}
+
 // ============================================================================
 // Helper: determine which nodes in the graph are supported and partition them.
 // Returns a list of node index groups (each group is one fused subgraph).
@@ -654,7 +688,8 @@ static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
 // place and restores them before returning.
 static std::vector<std::vector<int>> FindSupportedGroups(
     onnx::GraphProto& graph_proto,
-    const NeuronWrapperState* state) {
+    const NeuronWrapperState* state,
+    const std::unordered_set<int>& refused_nodes = {}) {
 
   using namespace onnxruntime::neuron;
   using namespace partition_detail;
@@ -718,6 +753,16 @@ static std::vector<std::vector<int>> FindSupportedGroups(
     if (it == op_builders.end() ||
         !it->second->IsOpSupported(node, ctx, check_params)) {
       continue;
+    }
+
+    // the partition probe below skips groups with layout-sensitive ops
+    if (!state->skip_capability_probe && it->second->RequiresRuntimeProbe(node)) {
+      std::string reason;
+      if (!RuntimeProbeSupportsNode(graph_proto, ctx, i, state, reason)) {
+        LOGS_NEURON(INFO) << "Node [" << node.name() << "] op_type [" << op
+                          << "]: declined by the runtime probe (" << reason << ")";
+        continue;
+      }
     }
 
     // MDLA rejects any operand dimension above 65535.
