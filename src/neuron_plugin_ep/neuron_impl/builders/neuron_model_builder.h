@@ -61,6 +61,9 @@ class ModelBuilder {
   // asks the target devices whether they can run every operation in the model
   NeuronStatus ValidateDeviceSupport();
 
+  // after ValidateDeviceSupport() fails: the nodes with unsupported operations
+  const std::vector<int>& UnsupportedNodeIndices() const { return unsupported_node_indices_; }
+
   NeuronStatus Compile(std::unique_ptr<neuron::wrapper::Model>& model);
   NeuronStatus RestoredFromAdapterFormattedDla(std::unique_ptr<neuron::wrapper::Model>& model);
 
@@ -227,6 +230,10 @@ class ModelBuilder {
   gsl::span<const wrapper::Device> neuron_target_devices_;
   const neuron::wrapper::TargetDeviceOption target_device_option_;
   size_t num_neuron_ops_ = 0;
+  // node index of each Neuron operation
+  std::vector<int> neuron_op_node_;
+  int current_node_index_ = -1;
+  std::vector<int> unsupported_node_indices_;
   uint32_t next_index_ = 0;
 
   // false when no target devices were resolved, so Compile() stays device-agnostic

@@ -748,6 +748,9 @@ static std::vector<std::vector<int>> FindSupportedGroups(
       }
     }
 
+    // refused by the compiler in an earlier round
+    if (refused_nodes.count(i)) continue;
+
     // Op-builder support check.
     const auto it = op_builders.find(op);
     if (it == op_builders.end() ||
@@ -1140,6 +1143,7 @@ static void ExtractSubgraphProto(const onnx::GraphProto& parent,
 
   // Nodes, in the parent's topological order.
   std::vector<int> ordered(node_indices);
+  // ascending: FilterGroupsByDeviceSupport relies on it
   std::sort(ordered.begin(), ordered.end());
 
   std::unordered_set<std::string> added_inputs;
@@ -1181,6 +1185,9 @@ static void ExtractSubgraphProto(const onnx::GraphProto& parent,
 
 constexpr const char* kMSInternalNHWCDomain = "com.ms.internal.nhwc";
 
+// rounds of excluding the refused nodes and partitioning again
+constexpr int kMaxRepartitionRounds = 4;
+
 // ops ORT permutes during layout transformation, which runs after GetCapability
 static const std::unordered_set<std::string>& LayoutSensitiveOps() {
   static const std::unordered_set<std::string> kOps = {
@@ -1200,12 +1207,15 @@ static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
     const onnx::GraphProto&                        graph_proto,
     const onnxruntime::neuron::NeuronGraphContext& ctx,
     std::vector<std::vector<int>>                  groups,
-    const NeuronWrapperState*                      state) {
+    const NeuronWrapperState*                      state,
+    std::unordered_set<int>*                       refused_out = nullptr) {
 
   if (state->skip_capability_probe || groups.empty()) return groups;
 
+  // refused_out, if set, gets the nodes the compiler refused
   const auto probe_compiles = [&](const std::vector<int>& group,
-                                  std::string& reason) -> bool {
+                                  std::string& reason,
+                                  std::vector<int>* refused = nullptr) -> bool {
     onnx::GraphProto sub;
     ExtractSubgraphProto(graph_proto, group, ctx, sub);
     try {
@@ -1223,6 +1233,14 @@ static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
       NeuronStatus ns = probe.ValidateDeviceSupport();
       if (!ns.IsOK()) {
         reason = ns.ErrorMessage();
+        if (refused) {
+          // subgraph node i is the i-th smallest parent index
+          std::vector<int> ordered(group);
+          std::sort(ordered.begin(), ordered.end());
+          for (int sub_idx : probe.UnsupportedNodeIndices())
+            if (sub_idx >= 0 && static_cast<size_t>(sub_idx) < ordered.size())
+              refused->push_back(ordered[static_cast<size_t>(sub_idx)]);
+        }
         return false;
       }
       return true;
@@ -1289,10 +1307,15 @@ static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
 
     bool ok = false;
     std::string reason;
-    ok = probe_compiles(group, reason);
+    std::vector<int> refused_nodes;
+    ok = probe_compiles(group, reason, &refused_nodes);
 
     if (ok) {
       kept.push_back(std::move(group));
+    } else if (refused_out && !refused_nodes.empty()) {
+      LOGS_NEURON(INFO) << "Partition of " << group.size() << " nodes rejected (" << reason
+                        << "); excluding " << refused_nodes.size() << " of them";
+      refused_out->insert(refused_nodes.begin(), refused_nodes.end());
     } else {
       LOGS_NEURON(INFO) << "Declining partition of " << group.size()
                         << " node(s); the Neuron compiler cannot build it ("
@@ -1465,9 +1488,22 @@ OrtStatus* NeuronWrapper_GetCapability(
 
   // Find supported node groups from the static op-capability checks, then
   // confirm each one against the hardware before claiming it.
+  //
+  // A rejected group is partitioned again without the nodes the compiler
+  // refused, rather than moving all of it to the CPU.
   onnxruntime::neuron::NeuronGraphContext ctx(graph_proto);
-  const auto proposed = FindSupportedGroups(graph_proto, state);
-  const auto groups   = FilterGroupsByDeviceSupport(graph_proto, ctx, proposed, state);
+  std::unordered_set<int> refused;
+  std::vector<std::vector<int>> proposed, groups;
+  for (int round = 0; round < kMaxRepartitionRounds; ++round) {
+    proposed = FindSupportedGroups(graph_proto, state, refused);
+    std::unordered_set<int> newly;
+    groups = FilterGroupsByDeviceSupport(graph_proto, ctx, proposed, state,
+                                         round + 1 < kMaxRepartitionRounds ? &newly : nullptr);
+    size_t before = refused.size();
+    refused.insert(newly.begin(), newly.end());
+    if (refused.size() == before) break;
+    LOGS_NEURON(INFO) << "Partitioning again without " << refused.size() << " refused nodes";
+  }
 
   {
     size_t supported_nodes = 0;
