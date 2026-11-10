@@ -118,6 +118,8 @@ struct NeuronWrapperState {
 
   // NEURON_FLAG_SKIP_CAPABILITY_PROBE; trades CPU fallback for partitioning speed
   bool skip_capability_probe{false};
+  // NEURON_FLAG_GRIDSAMPLE_ABS_GRID
+  bool gridsample_abs_grid{false};
 
   // Whether this Neuron stack can build an MDLA QuantizeLayer from a float
   // input; a device property probed once on first use (-1 = not yet known).
@@ -647,6 +649,7 @@ static bool RuntimeProbeSupportsNode(const onnx::GraphProto& graph_proto,
         state->optimization_string);
     probe.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
     probe.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+    probe.SetGridSampleAbsGrid(state->gridsample_abs_grid);
     NeuronStatus ns = probe.ValidateDeviceSupport();
     if (!ns.IsOK()) { reason = ns.ErrorMessage(); return false; }
     return true;
@@ -1237,6 +1240,7 @@ static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
           state->optimization_string);
       probe.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
       probe.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+      probe.SetGridSampleAbsGrid(state->gridsample_abs_grid);
 
       NeuronStatus ns = probe.ValidateDeviceSupport();
       if (!ns.IsOK()) {
@@ -1371,6 +1375,7 @@ NeuronWrapperHandle NeuronWrapper_Create(
   if (!min_gs.empty()) s->min_group_size = static_cast<uint32_t>(std::stoi(min_gs));
 
   s->skip_capability_probe = (get("NEURON_FLAG_SKIP_CAPABILITY_PROBE") == "1");
+  s->gridsample_abs_grid   = (get("NEURON_FLAG_GRIDSAMPLE_ABS_GRID") == "1");
 
   s->optimization_string = get("NEURON_FLAG_OPTIMIZATION_STRING");
 
@@ -1682,6 +1687,7 @@ OrtStatus* NeuronWrapper_Compile(
 
     builder.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
     builder.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+    builder.SetGridSampleAbsGrid(state->gridsample_abs_grid);
     builder.SetEpContextDir(context_model_path.parent_path());
     if (can_store_dla) {
       builder.SetStoreDla(true);

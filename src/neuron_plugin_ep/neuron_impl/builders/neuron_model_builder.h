@@ -144,6 +144,9 @@ class ModelBuilder {
   bool UseNHWC() const { return !use_nchw_; }
 
   void SetUseFp16(bool use_fp16) { use_fp16_ = use_fp16; }
+  // NEURON_FLAG_GRIDSAMPLE_ABS_GRID
+  void SetGridSampleAbsGrid(bool v) { gridsample_abs_grid_ = v; }
+  bool GridSampleAbsGrid() const { return gridsample_abs_grid_; }
   void SetStoreDla(bool store_dla) { store_dla_ = store_dla; }
   // Directory holding the context .onnx; used to resolve a sidecar DLA file
   // referenced by an EPContext node with embed_mode=0.
@@ -191,6 +194,7 @@ class ModelBuilder {
 
   bool use_nchw_{false};
   bool use_fp16_{false};
+  bool gridsample_abs_grid_{false};
   bool store_dla_{false};
   std::filesystem::path dla_path_{};
   std::filesystem::path ep_context_dir_{};

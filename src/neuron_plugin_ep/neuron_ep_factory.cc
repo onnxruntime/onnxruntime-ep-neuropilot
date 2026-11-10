@@ -130,6 +130,7 @@ OrtStatus* ORT_API_CALL NeuronEpFactory::GetSupportedDevicesImpl(
     f.ort_api.AddKeyValuePair(ep_options, "NEURON_FLAG_CPU_ONLY",  "0");
     f.ort_api.AddKeyValuePair(ep_options, "NEURON_FLAG_MDLA_ONLY", "0");
     f.ort_api.AddKeyValuePair(ep_options, "NEURON_FLAG_SKIP_CAPABILITY_PROBE", "0");
+    f.ort_api.AddKeyValuePair(ep_options, "NEURON_FLAG_GRIDSAMPLE_ABS_GRID", "0");
 
     OrtEpDevice* ep_device = nullptr;
     OrtStatus* st = f.ep_api.CreateEpDevice(&f, devices[i], ep_metadata, ep_options, &ep_device);
@@ -201,6 +202,7 @@ OrtStatus* ORT_API_CALL NeuronEpFactory::CreateEpImpl(
         "NEURON_FLAG_OPTIMIZATION_STRING",
         "NEURON_FLAG_FORCE_SKIP_OPS_STRING",
         "NEURON_FLAG_SKIP_CAPABILITY_PROBE",
+        "NEURON_FLAG_GRIDSAMPLE_ABS_GRID",
         "NEURON_FLAG_MAX_PARTITION_BYTES",
         "NEURON_FLAG_PARTITION_COUNT",
         "NEURON_FLAG_MAX_PARTITION_NODES",
