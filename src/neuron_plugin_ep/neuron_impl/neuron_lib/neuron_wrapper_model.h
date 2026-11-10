@@ -136,6 +136,9 @@ class Model {
 
   std::unique_ptr<NNMemory> mem_initializers_;
   std::vector<std::unique_ptr<NNMemory>> mem_persist_buffers_;
+  // Keep raw DLA bytes alive until the destructor frees the Neuron handles.
+  // Each string has a separate allocation so growing this vector cannot move it.
+  std::vector<std::unique_ptr<std::string>> raw_dla_payloads_;
 
   std::vector<std::string> input_names_;
   std::vector<std::string> output_names_;
