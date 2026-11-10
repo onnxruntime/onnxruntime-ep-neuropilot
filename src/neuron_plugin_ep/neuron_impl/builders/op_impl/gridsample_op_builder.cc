@@ -14,6 +14,8 @@
 //   according to the following enum layouts:
 //     NEAREST=0, BILINEAR=1  (resamplingType)
 //     ZERO=0, DUPLICATE=1, REFLECTION=2  (borderType)
+// - NeuroPilot < 9.0.0 has no core NEURON_GRID_SAMPLE_2D; the op runs as the
+//   MTKEXT_GRID_SAMPLE_2D extension operation, like MTKEXT_LAYER_NORMALIZATION.
 //
 // Translation notes:
 //   node_unit.Inputs()[i].node_arg.Name()       → node.input(i)
@@ -122,6 +124,11 @@ class GridSampleOpBuilder : public BaseOpBuilder {
   }
 
   int GetMinSupportedOpSet(const onnx::NodeProto& /*node*/) const override { return 16; }
+
+ public:
+  // a GridSample partition is worth its own NPU dispatch
+  bool IsComputeHeavy(const onnx::NodeProto& /*node*/) const override { return true; }
+
 };
 
 // ---------------------------------------------------------------------------
@@ -156,8 +163,11 @@ NeuronStatus GridSampleOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_buil
   ADD_SCALAR_OPERAND(model_builder, input_indices, resample_type_i32);
   ADD_SCALAR_OPERAND(model_builder, input_indices, border_type_i32);
 
-  // align_corners bool scalar supported in Neuron >= 9.0.0
-  if (GreaterEqualVersion(model_builder.GetNeuronVersion(), {9, 0, 0})) {
+  const bool use_core_op =
+      GreaterEqualVersion(model_builder.GetNeuronVersion(), {9, 0, 0});
+
+  // align_corners: core op from Neuron >= 9.0.0, the MTKEXT op before that
+  {
     uint32_t idx_bool = 0;
     NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromScalar(align_corners_bool, idx_bool));
     input_indices.push_back(idx_bool);
@@ -167,7 +177,28 @@ NeuronStatus GridSampleOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_buil
                                          operand_types.at(x).operandType.scale,
                                          operand_types.at(x).operandType.zeroPoint);
 
-  NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_GRID_SAMPLE_2D,
+  if (use_core_op) {
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_GRID_SAMPLE_2D,
+                                                       input_indices,
+                                                       {y},
+                                                       {output_operand_type}));
+    return NeuronStatus::OK();
+  }
+
+  // NeuroPilot < 9: general extension operation, selected by its name operand
+  const std::string ext_name = "MTKEXT_GRID_SAMPLE_2D";
+  uint32_t mtkext_operand_index = 0;
+  const auto mtkext_operand_name = model_builder.GetUniqueName(node.name() + "_mtkext");
+  NEURON_RETURN_IF_ERROR(model_builder.AddCustomNameStringOperand(
+      ext_name, mtkext_operand_name, mtkext_operand_index));
+  input_indices.push_back(operand_indices.at(mtkext_operand_name));
+
+  NeuronOperationType ext_op_type;
+  NEURON_RETURN_IF_ERROR(model_builder.GetExtensionGeneralOperationType(&ext_op_type));
+
+  LOGS_NEURON(VERBOSE) << "GridSample: emitting " << ext_name;
+
+  NEURON_RETURN_IF_ERROR(model_builder.AddOperation(ext_op_type,
                                                      input_indices,
                                                      {y},
                                                      {output_operand_type}));
