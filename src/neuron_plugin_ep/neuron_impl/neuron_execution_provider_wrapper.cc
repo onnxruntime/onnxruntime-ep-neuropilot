@@ -95,6 +95,10 @@ struct NeuronWrapperState {
   // NEURON_FLAG_PARTITION_COUNT: instead of a byte budget, cut each oversized
   // group into this many chunks balanced by constant bytes (0 = use the budget).
   uint32_t partition_count{0};
+  // NEURON_FLAG_MAX_PARTITION_NODES: cut claimed groups into slices of at most
+  // this many nodes (0 = unlimited), for partitions the compiler accepts but
+  // then fails to generate code for
+  uint32_t max_partition_nodes{0};
   // NEURON_FLAG_COMPUTE_LIGHT_MIN_NODES: keep a partition without any
   // conv/matmul once it has at least this many nodes (e.g. a detection head's
   // anchor decode); smaller compute-light fragments run faster on CPU than as
@@ -510,12 +514,13 @@ static bool HasSaturatedInt32Bias(const onnx::NodeProto& node,
 // count == 0: greedy chunks of at most `budget` bytes.  count > 0: an oversized
 // group is cut at the legal boundaries closest to k*total/count, i.e. `count`
 // chunks balanced by constant bytes; `budget` is then only checked and warned.
+// max_nodes > 0 also closes a chunk at that many nodes.
 // ============================================================================
 static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
     const onnx::GraphProto& graph_proto,
     const onnxruntime::neuron::NeuronGraphContext& ctx,
     std::vector<std::vector<int>> groups,
-    uint64_t budget, uint32_t count) {
+    uint64_t budget, uint32_t count, uint32_t max_nodes) {
   const int N = graph_proto.node_size();
 
   // unit_end[i]: highest node index of any QDQ unit containing node i.  A cut
@@ -571,7 +576,8 @@ static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
   for (auto& group : groups) {
     std::unordered_set<std::string> seen;
     const uint64_t total = group_bytes(group);
-    if (total <= budget && !(count > 0 && total == largest && total > 0)) {
+    const bool too_many_nodes = max_nodes > 0 && group.size() > max_nodes;
+    if (total <= budget && !(count > 0 && total == largest && total > 0) && !too_many_nodes) {
       out.push_back(std::move(group));
       continue;
     }
@@ -582,6 +588,7 @@ static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
     int pending = -1;
     seen.clear();
     auto cut_here = [&](uint64_t next) {
+      if (max_nodes > 0 && chunk.size() >= max_nodes) return true;
       if (count == 0) return bytes + next > budget;
       if (emitted + 1 >= count) return false;
       const uint64_t target = total * (emitted + 1) / count;
@@ -1094,11 +1101,12 @@ static std::vector<std::vector<int>> FindSupportedGroups(
     groups.push_back(std::move(kv.second));
   }
 
-  if (state->max_partition_bytes > 0 || state->partition_count > 0) {
+  if (state->max_partition_bytes > 0 || state->partition_count > 0 ||
+      state->max_partition_nodes > 0) {
     groups = SplitGroupsByConstantBytes(
         graph_proto, ctx, std::move(groups),
         state->max_partition_bytes > 0 ? state->max_partition_bytes : UINT64_MAX,
-        state->partition_count);
+        state->partition_count, state->max_partition_nodes);
   }
   return groups;
 }
@@ -1370,6 +1378,8 @@ NeuronWrapperHandle NeuronWrapper_Create(
   if (!max_pb.empty()) s->max_partition_bytes = std::stoull(max_pb);
   auto part_count = get("NEURON_FLAG_PARTITION_COUNT");
   if (!part_count.empty()) s->partition_count = static_cast<uint32_t>(std::stoul(part_count));
+  auto max_pn = get("NEURON_FLAG_MAX_PARTITION_NODES");
+  if (!max_pn.empty()) s->max_partition_nodes = static_cast<uint32_t>(std::stoul(max_pn));
   auto light_min = get("NEURON_FLAG_COMPUTE_LIGHT_MIN_NODES");
   if (!light_min.empty()) s->compute_light_min_nodes = static_cast<uint32_t>(std::stoul(light_min));
 
