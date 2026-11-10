@@ -138,9 +138,6 @@ const NeuronApi LoadNeuronApi() {
   NeuronApi neuron_api = {};
 #ifdef __ANDROID__
   neuron_api.android_sdk_version = GetAndroidSdkVersion();
-#else
-  neuron_api.android_sdk_version = kMinSdkVersionForNeuron13 + 1;
-#endif
   NEURONAPI_LOG("Android SDK version: %d", neuron_api.android_sdk_version);
   // if android version < S -> use nnapi
   if (neuron_api.android_sdk_version <= kMinSdkVersionForNeuron13) {
@@ -148,6 +145,7 @@ const NeuronApi LoadNeuronApi() {
     neuron_api.handle = nullptr;
     return neuron_api;
   }
+#endif
 
   void* libneuron_adapter = nullptr;
   const char* libraries[] = {
