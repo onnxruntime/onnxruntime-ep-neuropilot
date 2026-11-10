@@ -1208,8 +1208,13 @@ NeuronStatus ModelBuilder::AddDLaOperand(const onnx::NodeProto& node,
   OperandType op_type(dla_op_type);
   NEURON_RETURN_IF_ERROR(AddNewOperand("NeuronDLAContent", op_type, index));
 
-  std::string context_binary;
-  NEURON_RETURN_IF_ERROR(GetDlaPayload(node, ep_context_dir_, context_binary));
+  auto raw_dla_payload = std::make_unique<std::string>();
+  NEURON_RETURN_IF_ERROR(GetDlaPayload(node, ep_context_dir_, *raw_dla_payload));
+
+  // NO_COPY means Neuron keeps a pointer to these bytes instead of copying them.
+  // Let the model own the string so it stays alive after this function returns.
+  neuron_model_->raw_dla_payloads_.push_back(std::move(raw_dla_payload));
+  const std::string& context_binary = *neuron_model_->raw_dla_payloads_.back();
   NEURON_RETURN_STATUS_ON_ERROR_WITH_NOTE(
       neuron_.NeuronModel_setOperandValue(
           neuron_model_->model_, index,
