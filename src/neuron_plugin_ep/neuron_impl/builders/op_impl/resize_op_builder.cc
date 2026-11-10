@@ -107,9 +107,8 @@ NeuronStatus ResizeOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   const Shape& output_shape = shaper[output];
   const Shape& input_shape  = shaper[input];
 
-  // ORT's layout pass puts the Resize nodes it converts to NHWC in its
-  // internal NHWC domain; the shapes cannot tell for an identity resize.
-  const bool input_is_nchw = node.domain() != "com.ms.internal.nhwc";
+  // from the domain: an identity resize looks the same in both layouts
+  const bool input_is_nchw = !IsNodeLayoutNHWC(node);
 
   // For QDQResize, validate that the registered operand's quant params match.
   if (IsQuantizedOp(node, ctx)) {
