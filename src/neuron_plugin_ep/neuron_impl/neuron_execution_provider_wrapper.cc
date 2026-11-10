@@ -629,6 +629,41 @@ static void ExtractSubgraphProto(const onnx::GraphProto& parent,
                                  const onnxruntime::neuron::NeuronGraphContext& parent_ctx,
                                  onnx::GraphProto& out);
 
+constexpr const char* kMSInternalNHWCDomain = "com.ms.internal.nhwc";
+
+// The ops ORT converts to NHWC for the EP: spatial 4-D ops only, so the
+// transpose optimizer never permutes a non-4-D tensor.
+static const std::unordered_set<std::string_view>& NhwcConvertedOps() {
+  static const std::unordered_set<std::string_view> ops = {
+    "Conv", "ConvTranspose",
+    "AveragePool", "MaxPool", "GlobalAveragePool", "GlobalMaxPool",
+    "BatchNormalization", "InstanceNormalization",
+    "Resize", "Upsample",
+    "DepthToSpace", "SpaceToDepth",
+    "LRN",
+  };
+  return ops;
+}
+
+// The probe node as ORT will convert it: NHWC domain, NHWC input and output.
+static void AsConvertedToNhwc(onnx::GraphProto& sub) {
+  auto& node = *sub.mutable_node(0);
+  if (node.domain() == kMSInternalNHWCDomain) return;
+  node.set_domain(kMSInternalNHWCDomain);
+  auto to_nhwc = [&](onnx::ValueInfoProto& vi) {
+    if (vi.name() != node.input(0) && vi.name() != node.output(0)) return;
+    auto* shape = vi.mutable_type()->mutable_tensor_type()->mutable_shape();
+    if (shape->dim_size() != 4) return;
+    const auto c = shape->dim(1);
+    *shape->mutable_dim(1) = shape->dim(2);
+    *shape->mutable_dim(2) = shape->dim(3);
+    *shape->mutable_dim(3) = c;
+  };
+  for (auto& vi : *sub.mutable_input()) to_nhwc(vi);
+  for (auto& vi : *sub.mutable_output()) to_nhwc(vi);
+  for (auto& vi : *sub.mutable_value_info()) to_nhwc(vi);
+}
+
 // Builds `node_index` as a single-node Neuron model and asks the target
 // devices whether they support it.
 static bool RuntimeProbeSupportsNode(const onnx::GraphProto& graph_proto,
@@ -638,6 +673,10 @@ static bool RuntimeProbeSupportsNode(const onnx::GraphProto& graph_proto,
                                      std::string& reason) {
   onnx::GraphProto sub;
   ExtractSubgraphProto(graph_proto, {node_index}, ctx, sub);
+  // probe the node in the layout it will run in
+  if (!(state->neuron_flags & NEURON_FLAG_USE_NCHW) &&
+      NhwcConvertedOps().count(graph_proto.node(node_index).op_type()))
+    AsConvertedToNhwc(sub);
   try {
     onnxruntime::neuron::NeuronGraphContext sub_ctx(sub);
     onnxruntime::neuron::ModelBuilder probe(
@@ -1193,8 +1232,6 @@ static void ExtractSubgraphProto(const onnx::GraphProto& parent,
       if (!o.empty()) add_value_info(o, out.add_output());
   }
 }
-
-constexpr const char* kMSInternalNHWCDomain = "com.ms.internal.nhwc";
 
 // rounds of excluding the refused nodes and partitioning again
 constexpr int kMaxRepartitionRounds = 4;
@@ -1825,19 +1862,7 @@ int NeuronWrapper_ShouldSkipLayoutConversion(
     const char*         op_type,
     int                 /*target_layout*/) {
   if (!op_type) return 1;
-
-  // Only spatial 4-D ops benefit from NHWC layout conversion.
-  // Every other op must keep its original layout to avoid the transpose
-  // optimizer applying a 4-D permutation [0,2,3,1] to non-4-D tensors.
-  static const std::unordered_set<std::string_view> nhwc_ops = {
-    "Conv", "ConvTranspose",
-    "AveragePool", "MaxPool", "GlobalAveragePool", "GlobalMaxPool",
-    "BatchNormalization", "InstanceNormalization",
-    "Resize", "Upsample",
-    "DepthToSpace", "SpaceToDepth",
-    "LRN",
-  };
-  return nhwc_ops.count(op_type) ? 0 : 1;
+  return NhwcConvertedOps().count(op_type) ? 0 : 1;
 }
 
 }  // extern "C"
