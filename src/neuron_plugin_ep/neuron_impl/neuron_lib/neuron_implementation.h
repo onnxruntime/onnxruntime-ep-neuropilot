@@ -32,12 +32,27 @@
 
 #include "neuron_types.h"
 
+#ifdef __ANDROID__
+// Neuron needs Android 12 (SDK 31) or newer; older releases use NNAPI.
 constexpr int32_t kMinSdkVersionForNeuron13 = 30;
+#endif
 
 struct NeuronApi {
   void* handle;
   bool neuron_exists;
+#ifdef __ANDROID__
   int32_t android_sdk_version;
+#endif
+
+  // The NeuronModel_getExtensionOperationType call exists from Neuron 1.3 (Android 12) on;
+  // outside Android the adapter library is always new enough.
+  bool SupportsExtensionOps() const {
+#ifdef __ANDROID__
+    return android_sdk_version > kMinSdkVersionForNeuron13;
+#else
+    return true;
+#endif
+  }
 
   ~NeuronApi() {
     if (handle != nullptr) {

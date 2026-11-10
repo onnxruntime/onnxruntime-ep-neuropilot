@@ -1103,7 +1103,7 @@ NeuronStatus ModelBuilder::AddDequantizeLinear(const std::string& input,
 // ---------------------------------------------------------------------------
 NeuronStatus ModelBuilder::GetExtensionGeneralOperationType(NeuronOperationType* type) {
   NeuronOperationType operation_type = NEURON_OEM_OPERATION;
-  if (neuron_.android_sdk_version > kMinSdkVersionForNeuron13) {
+  if (neuron_.SupportsExtensionOps()) {
     NEURON_RETURN_STATUS_ON_ERROR_WITH_NOTE(
         neuron_.NeuronModel_getExtensionOperationType(
             neuron_model_->model_,

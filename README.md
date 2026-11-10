@@ -76,6 +76,7 @@ Key CMake options:
 | `ORT_INCLUDE_DIR` | dir with `onnxruntime_cxx_api.h` (required) |
 | `NEURON_OP_CAPABILITY_LIB_DIR` | dir containing the prebuilt `libneuron_op_capability.so` (**required**) |
 | `ORT_LIBRARY_DIR` | optional; enables `--no-undefined` link check |
+| `ORTNeuronEp_LOG_MIN_SEVERITY` | lowest severity the EP logs to stderr: 0 VERBOSE, 1 INFO, 2 WARNING, 3 ERROR (default 1) |
 | `ORTNeuronEp_INSTALL` | install targets; also stages the `.so` beside the EP (default ON) |
 | `ANDROID_NDK_HOME` / `ANDROID_ABI` / `ANDROID_PLATFORM` | Android only; read by `cmake/toolchain-android.cmake` (defaults `arm64-v8a` / `android-29`) |
 
