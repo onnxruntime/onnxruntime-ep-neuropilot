@@ -56,6 +56,8 @@ if(NOT CMAKE_BUILD_TYPE)
       "Choose build configuration. [Debug | Release | RelWithDebInfo]" FORCE)
 endif()
 
+set(ORTNeuronEp_LOG_MIN_SEVERITY 1 CACHE STRING
+  "Lowest severity the EP logs to stderr: 0 VERBOSE, 1 INFO, 2 WARNING, 3 ERROR")
 option(ORTNeuronEp_INSTALL           "Install ORTNeuronEp binaries and files" ON)
 option(ORTNeuronEp_OBJECT_CACHE      "Enable object caching via sccache/ccache" ON)
 # WIP: Python helper package (onnxruntime_ep_neuron). Disabled until the
@@ -331,9 +333,9 @@ target_compile_definitions(onnxruntime_providers_neuron PRIVATE
   # Release version of this EP, reported to ORT via OrtEpFactory::GetVersion.
   # Defined by CMake via project(... VERSION ...) above.
   ORT_NEURON_EP_VERSION="${PROJECT_VERSION}"
-  # Set to 0 to enable VERBOSE logs (LOGS_NEURON(VERBOSE) calls).
-  # Remove or set to 1 for INFO-and-above only in production.
-  NEURON_LOG_MIN_SEVERITY=0
+  # 0 = VERBOSE (all LOGS_NEURON calls), 1 = INFO, 2 = WARNING, 3 = ERROR.
+  # Configure with -DORTNeuronEp_LOG_MIN_SEVERITY=0 for the verbose compile/partition logs.
+  NEURON_LOG_MIN_SEVERITY=${ORTNeuronEp_LOG_MIN_SEVERITY}
 )
 
 # ---------------------------------------------------------------------------
