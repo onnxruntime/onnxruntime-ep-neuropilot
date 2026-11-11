@@ -236,10 +236,17 @@ static bool GetClipMinMax(const NeuronGraphContext& ctx,
 // PreprocessActivations
 // Detect Relu / Clip (Relu1, Relu6) nodes that can be fused with a preceding
 // op.  Store the mapping from their *input* name to the fuse code.
+// Only when the activation is the input's only consumer: fused, every other
+// consumer would read the activated value.
 // ---------------------------------------------------------------------------
 void ModelBuilder::PreprocessActivations() {
+  std::unordered_map<std::string, int> consumers;
+  for (const auto& node : ctx_.graph.node())
+    for (const auto& input : node.input()) ++consumers[input];
+
   for (const auto& node : ctx_.graph.node()) {
     const auto& op = node.op_type();
+    if (node.input_size() >= 1 && consumers[node.input(0)] != 1) continue;
     if (op == "Relu") {
       // Map the input name so FindActivation can look it up
       if (node.input_size() >= 1)

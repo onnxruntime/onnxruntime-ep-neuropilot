@@ -28,7 +28,7 @@ class LeakyReluOpBuilder : public BaseOpBuilder {
 
 NeuronStatus LeakyReluOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
                                                         const onnx::NodeProto& node,
-                                                        const NeuronGraphContext& /*ctx*/) const {
+                                                        const NeuronGraphContext& ctx) const {
   auto& shaper(model_builder.GetShaper());
   const auto& operand_types(model_builder.GetOperandTypes());
   const auto& operand_indices(model_builder.GetOperandIndices());
@@ -43,14 +43,35 @@ NeuronStatus LeakyReluOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_build
   std::vector<uint32_t> input_indices;
   input_indices.push_back(operand_indices.at(input));
 
+  const Type input_type = operand_types.at(input).type;
+  const bool quantized = input_type == Type::TENSOR_QUANT8_ASYMM ||
+                         input_type == Type::TENSOR_QUANT8_ASYMM_SIGNED;
+
   std::vector<uint32_t> value_shape{1};
   const std::string alpha_vec_name = model_builder.GetUniqueName(node.name() + input + "_alpha");
-  const OperandType alpha_operand_type(Type::TENSOR_FLOAT32, value_shape);
-  NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(alpha_vec_name, &alpha,
-                                                                          alpha_operand_type));
+  if (quantized) {
+    // PRELU takes alpha in the input's type: one value, q = 1 at scale alpha
+    const uint8_t one = 1;
+    const OperandType alpha_operand_type(input_type, value_shape, alpha, 0);
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(alpha_vec_name, &one,
+                                                                            alpha_operand_type));
+  } else {
+    const OperandType alpha_operand_type(Type::TENSOR_FLOAT32, value_shape);
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(alpha_vec_name, &alpha,
+                                                                            alpha_operand_type));
+  }
   input_indices.push_back(operand_indices.at(alpha_vec_name));
 
-  const OperandType prelu_output_operand_type(operand_types.at(input).type, input_shape);
+  float y_scale = 0.0f;
+  int32_t y_zero_point = 0;
+  if (quantized) {
+    const auto* qdq = ctx.GetQDQGroup(output);
+    NEURON_RETURN_IF_NOT(qdq != nullptr && qdq->output_quant_params.has_value(),
+                         "LeakyReluOpBuilder: no output quantization for '", output, "'");
+    y_scale = qdq->output_quant_params->scale;
+    y_zero_point = qdq->output_quant_params->zero_point;
+  }
+  const OperandType prelu_output_operand_type(input_type, input_shape, y_scale, y_zero_point);
   NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_PRELU, input_indices,
                                                      {output}, {prelu_output_operand_type}));
   return NeuronStatus::OK();
