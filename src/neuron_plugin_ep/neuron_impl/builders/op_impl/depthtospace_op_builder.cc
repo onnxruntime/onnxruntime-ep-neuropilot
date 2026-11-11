@@ -39,7 +39,9 @@ NeuronStatus DepthToSpaceOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_bu
     ADD_SCALAR_OPERAND(model_builder, input_indices, use_nchw);
   }
 
-  const OperandType output_operand_type(operand_types.at(input).type, shaper[output]);
+  // Keeps the input's quantization parameters
+  OperandType output_operand_type = operand_types.at(input);
+  output_operand_type.SetDimensions(shaper[output]);
   NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_DEPTH_TO_SPACE, input_indices,
                                                      {output}, {output_operand_type}));
   return NeuronStatus::OK();
