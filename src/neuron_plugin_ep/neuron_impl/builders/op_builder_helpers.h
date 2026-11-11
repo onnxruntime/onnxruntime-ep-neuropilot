@@ -62,12 +62,9 @@ NeuronStatus AddMinMaxOperator(ModelBuilder& model_builder, const onnx::NodeProt
 NeuronStatus AddReshapeOperator(ModelBuilder& model_builder, const onnx::NodeProto& node, const NeuronGraphContext& ctx, const std::string& input, const std::vector<int32_t>& shape);
 NeuronStatus GetAxesForSqueezeAndUnSqueeze(ModelBuilder& model_builder, const onnx::NodeProto& node, const NeuronGraphContext& ctx, std::vector<int32_t>& axes);
 
-// Layout check
+// nodes ORT converted to NHWC are in its internal NHWC domain
 inline bool IsNodeLayoutNHWC(const onnx::NodeProto& node) {
-  for (const auto& attr : node.attribute()) {
-    if (attr.name() == "domain" && attr.s().find("NHWCDomain") != std::string::npos) return true;
-  }
-  return false;
+  return node.domain() == "com.ms.internal.nhwc";
 }
 
 // Quantization helpers

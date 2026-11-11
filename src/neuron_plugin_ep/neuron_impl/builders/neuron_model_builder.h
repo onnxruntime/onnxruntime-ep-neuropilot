@@ -61,6 +61,9 @@ class ModelBuilder {
   // asks the target devices whether they can run every operation in the model
   NeuronStatus ValidateDeviceSupport();
 
+  // after ValidateDeviceSupport() fails: the nodes with unsupported operations
+  const std::vector<int>& UnsupportedNodeIndices() const { return unsupported_node_indices_; }
+
   NeuronStatus Compile(std::unique_ptr<neuron::wrapper::Model>& model);
   NeuronStatus RestoredFromAdapterFormattedDla(std::unique_ptr<neuron::wrapper::Model>& model);
 
@@ -141,6 +144,9 @@ class ModelBuilder {
   bool UseNHWC() const { return !use_nchw_; }
 
   void SetUseFp16(bool use_fp16) { use_fp16_ = use_fp16; }
+  // NEURON_FLAG_GRIDSAMPLE_ABS_GRID
+  void SetGridSampleAbsGrid(bool v) { gridsample_abs_grid_ = v; }
+  bool GridSampleAbsGrid() const { return gridsample_abs_grid_; }
   void SetStoreDla(bool store_dla) { store_dla_ = store_dla; }
   // Directory holding the context .onnx; used to resolve a sidecar DLA file
   // referenced by an EPContext node with embed_mode=0.
@@ -188,6 +194,7 @@ class ModelBuilder {
 
   bool use_nchw_{false};
   bool use_fp16_{false};
+  bool gridsample_abs_grid_{false};
   bool store_dla_{false};
   std::filesystem::path dla_path_{};
   std::filesystem::path ep_context_dir_{};
@@ -227,6 +234,10 @@ class ModelBuilder {
   gsl::span<const wrapper::Device> neuron_target_devices_;
   const neuron::wrapper::TargetDeviceOption target_device_option_;
   size_t num_neuron_ops_ = 0;
+  // node index of each Neuron operation
+  std::vector<int> neuron_op_node_;
+  int current_node_index_ = -1;
+  std::vector<int> unsupported_node_indices_;
   uint32_t next_index_ = 0;
 
   // false when no target devices were resolved, so Compile() stays device-agnostic

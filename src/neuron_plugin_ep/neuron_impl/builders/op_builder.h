@@ -54,6 +54,10 @@ class IOpBuilder {
 
   // is this op worth a dedicated NPU dispatch
   virtual bool IsComputeHeavy(const onnx::NodeProto& node) const = 0;
+
+  // confirm with the Neuron runtime before claiming: for ops whose support
+  // depends on the runtime or the SoC, not on the capability table
+  virtual bool RequiresRuntimeProbe(const onnx::NodeProto& /*node*/) const { return false; }
 };
 
 }  // namespace neuron

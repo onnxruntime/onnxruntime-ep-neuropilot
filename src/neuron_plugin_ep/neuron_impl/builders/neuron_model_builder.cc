@@ -691,6 +691,9 @@ NeuronStatus ModelBuilder::AddOperations() {
     LOGS_NEURON(VERBOSE) << "Adding node [" << node_idx << "] op_type: ["
                          << node.op_type() << "]";
 
+    // the Neuron operations added below belong to this node
+    current_node_index_ = node_idx;
+
     const auto it = op_builders.find(node.op_type());
     if (it != op_builders.end()) {
       NEURON_RETURN_IF_ERROR(it->second->AddToModelBuilder(*this, node, ctx_));
@@ -730,6 +733,7 @@ NeuronStatus ModelBuilder::AddOperation(int op,
       "op = " + std::to_string(op));
 
   num_neuron_ops_++;
+  neuron_op_node_.push_back(current_node_index_);
   LOGS_NEURON(VERBOSE) << "Added Neuron Operation [" << NeuronOperationTypeToStr(op) << "]"
                        << " inputs: " << Shape2String(input_indices)
                        << " outputs: " << Shape2String(output_indices);
@@ -1314,6 +1318,15 @@ NeuronStatus ModelBuilder::ValidateDeviceSupport() {
                             supported_ops_holder.get() + num_neuron_ops_,
                             [](bool s) { return s; });
   if (!all_ok) {
+    // map the unsupported operations back to their nodes
+    unsupported_node_indices_.clear();
+    std::unordered_set<int> seen;
+    for (size_t i = 0; i < num_neuron_ops_; ++i) {
+      if (supported_ops_holder[i]) continue;
+      const int node = (i < neuron_op_node_.size()) ? neuron_op_node_[i] : -1;
+      if (node >= 0 && seen.insert(node).second)
+        unsupported_node_indices_.push_back(node);
+    }
     LOGS_NEURON(VERBOSE) << "Some ops not supported by target devices: "
                          << GetDevicesDescription(neuron_target_devices_);
     return NeuronStatus{false, MakeNeuronString(
