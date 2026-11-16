@@ -95,6 +95,10 @@ struct NeuronWrapperState {
   // NEURON_FLAG_PARTITION_COUNT: instead of a byte budget, cut each oversized
   // group into this many chunks balanced by constant bytes (0 = use the budget).
   uint32_t partition_count{0};
+  // NEURON_FLAG_MAX_PARTITION_NODES: cut claimed groups into slices of at most
+  // this many nodes (0 = unlimited), for partitions the compiler accepts but
+  // then fails to generate code for
+  uint32_t max_partition_nodes{0};
   // NEURON_FLAG_COMPUTE_LIGHT_MIN_NODES: keep a partition without any
   // conv/matmul once it has at least this many nodes (e.g. a detection head's
   // anchor decode); smaller compute-light fragments run faster on CPU than as
@@ -114,6 +118,8 @@ struct NeuronWrapperState {
 
   // NEURON_FLAG_SKIP_CAPABILITY_PROBE; trades CPU fallback for partitioning speed
   bool skip_capability_probe{false};
+  // NEURON_FLAG_GRIDSAMPLE_ABS_GRID
+  bool gridsample_abs_grid{false};
 
   // Whether this Neuron stack can build an MDLA QuantizeLayer from a float
   // input; a device property probed once on first use (-1 = not yet known).
@@ -510,12 +516,13 @@ static bool HasSaturatedInt32Bias(const onnx::NodeProto& node,
 // count == 0: greedy chunks of at most `budget` bytes.  count > 0: an oversized
 // group is cut at the legal boundaries closest to k*total/count, i.e. `count`
 // chunks balanced by constant bytes; `budget` is then only checked and warned.
+// max_nodes > 0 also closes a chunk at that many nodes.
 // ============================================================================
 static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
     const onnx::GraphProto& graph_proto,
     const onnxruntime::neuron::NeuronGraphContext& ctx,
     std::vector<std::vector<int>> groups,
-    uint64_t budget, uint32_t count) {
+    uint64_t budget, uint32_t count, uint32_t max_nodes) {
   const int N = graph_proto.node_size();
 
   // unit_end[i]: highest node index of any QDQ unit containing node i.  A cut
@@ -571,7 +578,8 @@ static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
   for (auto& group : groups) {
     std::unordered_set<std::string> seen;
     const uint64_t total = group_bytes(group);
-    if (total <= budget && !(count > 0 && total == largest && total > 0)) {
+    const bool too_many_nodes = max_nodes > 0 && group.size() > max_nodes;
+    if (total <= budget && !(count > 0 && total == largest && total > 0) && !too_many_nodes) {
       out.push_back(std::move(group));
       continue;
     }
@@ -582,6 +590,7 @@ static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
     int pending = -1;
     seen.clear();
     auto cut_here = [&](uint64_t next) {
+      if (max_nodes > 0 && chunk.size() >= max_nodes) return true;
       if (count == 0) return bytes + next > budget;
       if (emitted + 1 >= count) return false;
       const uint64_t target = total * (emitted + 1) / count;
@@ -613,6 +622,80 @@ static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
     if (!chunk.empty()) emit(nullptr);
   }
   return out;
+}
+
+static void ExtractSubgraphProto(const onnx::GraphProto& parent,
+                                 const std::vector<int>& node_indices,
+                                 const onnxruntime::neuron::NeuronGraphContext& parent_ctx,
+                                 onnx::GraphProto& out);
+
+constexpr const char* kMSInternalNHWCDomain = "com.ms.internal.nhwc";
+
+// The ops ORT converts to NHWC for the EP: spatial 4-D ops only, so the
+// transpose optimizer never permutes a non-4-D tensor.
+static const std::unordered_set<std::string_view>& NhwcConvertedOps() {
+  static const std::unordered_set<std::string_view> ops = {
+    "Conv", "ConvTranspose",
+    "AveragePool", "MaxPool", "GlobalAveragePool", "GlobalMaxPool",
+    "BatchNormalization", "InstanceNormalization",
+    "Resize", "Upsample",
+    "DepthToSpace", "SpaceToDepth",
+    "LRN",
+  };
+  return ops;
+}
+
+// The probe node as ORT will convert it: NHWC domain, NHWC input and output.
+static void AsConvertedToNhwc(onnx::GraphProto& sub) {
+  auto& node = *sub.mutable_node(0);
+  if (node.domain() == kMSInternalNHWCDomain) return;
+  node.set_domain(kMSInternalNHWCDomain);
+  auto to_nhwc = [&](onnx::ValueInfoProto& vi) {
+    if (vi.name() != node.input(0) && vi.name() != node.output(0)) return;
+    auto* shape = vi.mutable_type()->mutable_tensor_type()->mutable_shape();
+    if (shape->dim_size() != 4) return;
+    const auto c = shape->dim(1);
+    *shape->mutable_dim(1) = shape->dim(2);
+    *shape->mutable_dim(2) = shape->dim(3);
+    *shape->mutable_dim(3) = c;
+  };
+  for (auto& vi : *sub.mutable_input()) to_nhwc(vi);
+  for (auto& vi : *sub.mutable_output()) to_nhwc(vi);
+  for (auto& vi : *sub.mutable_value_info()) to_nhwc(vi);
+}
+
+// Builds `node_index` as a single-node Neuron model and asks the target
+// devices whether they support it.
+static bool RuntimeProbeSupportsNode(const onnx::GraphProto& graph_proto,
+                                     const onnxruntime::neuron::NeuronGraphContext& ctx,
+                                     int node_index,
+                                     const NeuronWrapperState* state,
+                                     std::string& reason) {
+  onnx::GraphProto sub;
+  ExtractSubgraphProto(graph_proto, {node_index}, ctx, sub);
+  // probe the node in the layout it will run in
+  if (!(state->neuron_flags & NEURON_FLAG_USE_NCHW) &&
+      NhwcConvertedOps().count(graph_proto.node(node_index).op_type()))
+    AsConvertedToNhwc(sub);
+  try {
+    onnxruntime::neuron::NeuronGraphContext sub_ctx(sub);
+    onnxruntime::neuron::ModelBuilder probe(
+        sub_ctx,
+        *state->neuron_handle,
+        state->neuron_version,
+        state->neuron_target_devices,
+        state->target_device_option,
+        state->optimization_string);
+    probe.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
+    probe.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+    probe.SetGridSampleAbsGrid(state->gridsample_abs_grid);
+    NeuronStatus ns = probe.ValidateDeviceSupport();
+    if (!ns.IsOK()) { reason = ns.ErrorMessage(); return false; }
+    return true;
+  } catch (const std::exception& e) {
+    reason = std::string("exception: ") + e.what();
+    return false;
+  }
 }
 
 // ============================================================================
@@ -654,7 +737,8 @@ static std::vector<std::vector<int>> SplitGroupsByConstantBytes(
 // place and restores them before returning.
 static std::vector<std::vector<int>> FindSupportedGroups(
     onnx::GraphProto& graph_proto,
-    const NeuronWrapperState* state) {
+    const NeuronWrapperState* state,
+    const std::unordered_set<int>& refused_nodes = {}) {
 
   using namespace onnxruntime::neuron;
   using namespace partition_detail;
@@ -713,11 +797,24 @@ static std::vector<std::vector<int>> FindSupportedGroups(
       }
     }
 
+    // refused by the compiler in an earlier round
+    if (refused_nodes.count(i)) continue;
+
     // Op-builder support check.
     const auto it = op_builders.find(op);
     if (it == op_builders.end() ||
         !it->second->IsOpSupported(node, ctx, check_params)) {
       continue;
+    }
+
+    // the partition probe below skips groups with layout-sensitive ops
+    if (!state->skip_capability_probe && it->second->RequiresRuntimeProbe(node)) {
+      std::string reason;
+      if (!RuntimeProbeSupportsNode(graph_proto, ctx, i, state, reason)) {
+        LOGS_NEURON(INFO) << "Node [" << node.name() << "] op_type [" << op
+                          << "]: declined by the runtime probe (" << reason << ")";
+        continue;
+      }
     }
 
     // MDLA rejects any operand dimension above 65535.
@@ -1046,11 +1143,12 @@ static std::vector<std::vector<int>> FindSupportedGroups(
     groups.push_back(std::move(kv.second));
   }
 
-  if (state->max_partition_bytes > 0 || state->partition_count > 0) {
+  if (state->max_partition_bytes > 0 || state->partition_count > 0 ||
+      state->max_partition_nodes > 0) {
     groups = SplitGroupsByConstantBytes(
         graph_proto, ctx, std::move(groups),
         state->max_partition_bytes > 0 ? state->max_partition_bytes : UINT64_MAX,
-        state->partition_count);
+        state->partition_count, state->max_partition_nodes);
   }
   return groups;
 }
@@ -1095,6 +1193,7 @@ static void ExtractSubgraphProto(const onnx::GraphProto& parent,
 
   // Nodes, in the parent's topological order.
   std::vector<int> ordered(node_indices);
+  // ascending: FilterGroupsByDeviceSupport relies on it
   std::sort(ordered.begin(), ordered.end());
 
   std::unordered_set<std::string> added_inputs;
@@ -1134,7 +1233,8 @@ static void ExtractSubgraphProto(const onnx::GraphProto& parent,
   }
 }
 
-constexpr const char* kMSInternalNHWCDomain = "com.ms.internal.nhwc";
+// rounds of excluding the refused nodes and partitioning again
+constexpr int kMaxRepartitionRounds = 4;
 
 // ops ORT permutes during layout transformation, which runs after GetCapability
 static const std::unordered_set<std::string>& LayoutSensitiveOps() {
@@ -1155,12 +1255,15 @@ static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
     const onnx::GraphProto&                        graph_proto,
     const onnxruntime::neuron::NeuronGraphContext& ctx,
     std::vector<std::vector<int>>                  groups,
-    const NeuronWrapperState*                      state) {
+    const NeuronWrapperState*                      state,
+    std::unordered_set<int>*                       refused_out = nullptr) {
 
   if (state->skip_capability_probe || groups.empty()) return groups;
 
+  // refused_out, if set, gets the nodes the compiler refused
   const auto probe_compiles = [&](const std::vector<int>& group,
-                                  std::string& reason) -> bool {
+                                  std::string& reason,
+                                  std::vector<int>* refused = nullptr) -> bool {
     onnx::GraphProto sub;
     ExtractSubgraphProto(graph_proto, group, ctx, sub);
     try {
@@ -1174,10 +1277,19 @@ static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
           state->optimization_string);
       probe.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
       probe.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+      probe.SetGridSampleAbsGrid(state->gridsample_abs_grid);
 
       NeuronStatus ns = probe.ValidateDeviceSupport();
       if (!ns.IsOK()) {
         reason = ns.ErrorMessage();
+        if (refused) {
+          // subgraph node i is the i-th smallest parent index
+          std::vector<int> ordered(group);
+          std::sort(ordered.begin(), ordered.end());
+          for (int sub_idx : probe.UnsupportedNodeIndices())
+            if (sub_idx >= 0 && static_cast<size_t>(sub_idx) < ordered.size())
+              refused->push_back(ordered[static_cast<size_t>(sub_idx)]);
+        }
         return false;
       }
       return true;
@@ -1244,10 +1356,15 @@ static std::vector<std::vector<int>> FilterGroupsByDeviceSupport(
 
     bool ok = false;
     std::string reason;
-    ok = probe_compiles(group, reason);
+    std::vector<int> refused_nodes;
+    ok = probe_compiles(group, reason, &refused_nodes);
 
     if (ok) {
       kept.push_back(std::move(group));
+    } else if (refused_out && !refused_nodes.empty()) {
+      LOGS_NEURON(INFO) << "Partition of " << group.size() << " nodes rejected (" << reason
+                        << "); excluding " << refused_nodes.size() << " of them";
+      refused_out->insert(refused_nodes.begin(), refused_nodes.end());
     } else {
       LOGS_NEURON(INFO) << "Declining partition of " << group.size()
                         << " node(s); the Neuron compiler cannot build it ("
@@ -1295,6 +1412,7 @@ NeuronWrapperHandle NeuronWrapper_Create(
   if (!min_gs.empty()) s->min_group_size = static_cast<uint32_t>(std::stoi(min_gs));
 
   s->skip_capability_probe = (get("NEURON_FLAG_SKIP_CAPABILITY_PROBE") == "1");
+  s->gridsample_abs_grid   = (get("NEURON_FLAG_GRIDSAMPLE_ABS_GRID") == "1");
 
   s->optimization_string = get("NEURON_FLAG_OPTIMIZATION_STRING");
 
@@ -1302,6 +1420,8 @@ NeuronWrapperHandle NeuronWrapper_Create(
   if (!max_pb.empty()) s->max_partition_bytes = std::stoull(max_pb);
   auto part_count = get("NEURON_FLAG_PARTITION_COUNT");
   if (!part_count.empty()) s->partition_count = static_cast<uint32_t>(std::stoul(part_count));
+  auto max_pn = get("NEURON_FLAG_MAX_PARTITION_NODES");
+  if (!max_pn.empty()) s->max_partition_nodes = static_cast<uint32_t>(std::stoul(max_pn));
   auto light_min = get("NEURON_FLAG_COMPUTE_LIGHT_MIN_NODES");
   if (!light_min.empty()) s->compute_light_min_nodes = static_cast<uint32_t>(std::stoul(light_min));
 
@@ -1420,9 +1540,22 @@ OrtStatus* NeuronWrapper_GetCapability(
 
   // Find supported node groups from the static op-capability checks, then
   // confirm each one against the hardware before claiming it.
+  //
+  // A rejected group is partitioned again without the nodes the compiler
+  // refused, rather than moving all of it to the CPU.
   onnxruntime::neuron::NeuronGraphContext ctx(graph_proto);
-  const auto proposed = FindSupportedGroups(graph_proto, state);
-  const auto groups   = FilterGroupsByDeviceSupport(graph_proto, ctx, proposed, state);
+  std::unordered_set<int> refused;
+  std::vector<std::vector<int>> proposed, groups;
+  for (int round = 0; round < kMaxRepartitionRounds; ++round) {
+    proposed = FindSupportedGroups(graph_proto, state, refused);
+    std::unordered_set<int> newly;
+    groups = FilterGroupsByDeviceSupport(graph_proto, ctx, proposed, state,
+                                         round + 1 < kMaxRepartitionRounds ? &newly : nullptr);
+    size_t before = refused.size();
+    refused.insert(newly.begin(), newly.end());
+    if (refused.size() == before) break;
+    LOGS_NEURON(INFO) << "Partitioning again without " << refused.size() << " refused nodes";
+  }
 
   {
     size_t supported_nodes = 0;
@@ -1591,6 +1724,7 @@ OrtStatus* NeuronWrapper_Compile(
 
     builder.SetUseNCHW(state->neuron_flags & NEURON_FLAG_USE_NCHW);
     builder.SetUseFp16(state->neuron_flags & NEURON_FLAG_USE_FP16);
+    builder.SetGridSampleAbsGrid(state->gridsample_abs_grid);
     builder.SetEpContextDir(context_model_path.parent_path());
     if (can_store_dla) {
       builder.SetStoreDla(true);
@@ -1728,19 +1862,7 @@ int NeuronWrapper_ShouldSkipLayoutConversion(
     const char*         op_type,
     int                 /*target_layout*/) {
   if (!op_type) return 1;
-
-  // Only spatial 4-D ops benefit from NHWC layout conversion.
-  // Every other op must keep its original layout to avoid the transpose
-  // optimizer applying a 4-D permutation [0,2,3,1] to non-4-D tensors.
-  static const std::unordered_set<std::string_view> nhwc_ops = {
-    "Conv", "ConvTranspose",
-    "AveragePool", "MaxPool", "GlobalAveragePool", "GlobalMaxPool",
-    "BatchNormalization", "InstanceNormalization",
-    "Resize", "Upsample",
-    "DepthToSpace", "SpaceToDepth",
-    "LRN",
-  };
-  return nhwc_ops.count(op_type) ? 0 : 1;
+  return NhwcConvertedOps().count(op_type) ? 0 : 1;
 }
 
 }  // extern "C"

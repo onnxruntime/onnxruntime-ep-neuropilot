@@ -35,6 +35,9 @@ class InstanceNormalizationOpBuilder : public BaseOpBuilder {
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& params) const override;
 
+ public:
+  // not every device has INSTANCE_NORMALIZATION
+  bool RequiresRuntimeProbe(const onnx::NodeProto& /*node*/) const override { return true; }
 };
 
 // Add operator related
@@ -112,8 +115,7 @@ NeuronStatus InstanceNormalizationOpBuilder::AddToModelBuilderImpl(
       model_builder.AddOperandFromPersistMemoryBuffer(eps_name, &eps, eps_operand_type));
   input_indices.push_back(operand_indices.at(eps_name));
 
-  // NCHW indicator: 0 = NHWC, 1 = NCHW.
-  // op_capability library guarantees only NHWC nodes reach here, so this is always 0.
+  // NCHW indicator: 0 = NHWC, 1 = NCHW (only with NEURON_FLAG_USE_NCHW).
   const std::vector<int32_t> nchw_data = {IsNodeLayoutNHWC(node) ? 0 : 1};
   const std::string nchw_name = model_builder.GetUniqueName(node.name() + input + "_nchw");
   const OperandType nchw_operand_type(Type::TENSOR_INT32, {1});

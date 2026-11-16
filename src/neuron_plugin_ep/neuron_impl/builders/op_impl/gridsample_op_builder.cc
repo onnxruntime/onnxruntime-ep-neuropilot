@@ -14,6 +14,8 @@
 //   according to the following enum layouts:
 //     NEAREST=0, BILINEAR=1  (resamplingType)
 //     ZERO=0, DUPLICATE=1, REFLECTION=2  (borderType)
+// - NeuroPilot < 9.0.0 has no core NEURON_GRID_SAMPLE_2D; the op runs as the
+//   MTKEXT_GRID_SAMPLE_2D extension operation, like MTKEXT_LAYER_NORMALIZATION.
 //
 // Translation notes:
 //   node_unit.Inputs()[i].node_arg.Name()       → node.input(i)
@@ -122,6 +124,13 @@ class GridSampleOpBuilder : public BaseOpBuilder {
   }
 
   int GetMinSupportedOpSet(const onnx::NodeProto& /*node*/) const override { return 16; }
+
+ public:
+  // a GridSample partition is worth its own NPU dispatch
+  bool IsComputeHeavy(const onnx::NodeProto& /*node*/) const override { return true; }
+
+  // not every 8.x runtime maps the MTKEXT op, and it needs an MVPU
+  bool RequiresRuntimeProbe(const onnx::NodeProto& /*node*/) const override { return true; }
 };
 
 // ---------------------------------------------------------------------------
@@ -151,13 +160,54 @@ NeuronStatus GridSampleOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_buil
   std::vector<uint32_t> input_indices;
   input_indices.reserve(5);
   input_indices.push_back(operand_indices.at(x));
-  input_indices.push_back(operand_indices.at(grid));
+
+  uint32_t grid_index = operand_indices.at(grid);
+  if (model_builder.GridSampleAbsGrid()) {
+    // NEURON_FLAG_GRIDSAMPLE_ABS_GRID: the 8.2.16 MVPU kernel reads the grid in
+    // pixels and ignores align_corners, so scale it from [-1, 1] here:
+    // x = gx * sx + ox, with s = W / 2 (or (W - 1) / 2 with align_corners) and
+    // o = (W - 1) / 2; the same for y and H
+    const Shape x_shape = shaper[x];  // [N, C, H, W]
+    NEURON_RETURN_IF_NOT(x_shape.size() == 4, "GridSample abs-grid workaround needs a 4-D X");
+    const float Hf = static_cast<float>(x_shape[2]);
+    const float Wf = static_cast<float>(x_shape[3]);
+    const float sx = align_corners_bool ? (Wf - 1.f) / 2.f : Wf / 2.f;
+    const float sy = align_corners_bool ? (Hf - 1.f) / 2.f : Hf / 2.f;
+    const float scale[2]  = {sx, sy};
+    const float offset[2] = {(Wf - 1.f) / 2.f, (Hf - 1.f) / 2.f};
+    const OperandType& grid_type = operand_types.at(grid);
+    const OperandType vec_type(grid_type.type, Shape{2});
+    const std::string scale_name  = model_builder.GetUniqueName(grid + "/abs_scale");
+    const std::string offset_name = model_builder.GetUniqueName(grid + "/abs_offset");
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(scale_name, scale, vec_type));
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(offset_name, offset, vec_type));
+    const OperandType grid_out_type(grid_type.type, shaper[grid]);
+    const std::string mul_out = model_builder.GetUniqueName(grid + "/abs_mul");
+    const std::string add_out = model_builder.GetUniqueName(grid + "/abs_grid");
+    {
+      std::vector<uint32_t> idx = {grid_index, model_builder.GetOperandIndices().at(scale_name)};
+      ADD_SCALAR_OPERAND(model_builder, idx, static_cast<int32_t>(NEURON_FUSED_NONE));
+      NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_MUL, idx, {mul_out}, {grid_out_type}));
+    }
+    {
+      std::vector<uint32_t> idx = {model_builder.GetOperandIndices().at(mul_out),
+                                   model_builder.GetOperandIndices().at(offset_name)};
+      ADD_SCALAR_OPERAND(model_builder, idx, static_cast<int32_t>(NEURON_FUSED_NONE));
+      NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_ADD, idx, {add_out}, {grid_out_type}));
+    }
+    grid_index = model_builder.GetOperandIndices().at(add_out);
+    LOGS_NEURON(VERBOSE) << "GridSample: grid scaled to pixels (NEURON_FLAG_GRIDSAMPLE_ABS_GRID)";
+  }
+  input_indices.push_back(grid_index);
 
   ADD_SCALAR_OPERAND(model_builder, input_indices, resample_type_i32);
   ADD_SCALAR_OPERAND(model_builder, input_indices, border_type_i32);
 
-  // align_corners bool scalar supported in Neuron >= 9.0.0
-  if (GreaterEqualVersion(model_builder.GetNeuronVersion(), {9, 0, 0})) {
+  const bool use_core_op =
+      GreaterEqualVersion(model_builder.GetNeuronVersion(), {9, 0, 0});
+
+  // align_corners: core op from Neuron >= 9.0.0, the MTKEXT op before that
+  {
     uint32_t idx_bool = 0;
     NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromScalar(align_corners_bool, idx_bool));
     input_indices.push_back(idx_bool);
@@ -167,7 +217,28 @@ NeuronStatus GridSampleOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_buil
                                          operand_types.at(x).operandType.scale,
                                          operand_types.at(x).operandType.zeroPoint);
 
-  NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_GRID_SAMPLE_2D,
+  if (use_core_op) {
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_GRID_SAMPLE_2D,
+                                                       input_indices,
+                                                       {y},
+                                                       {output_operand_type}));
+    return NeuronStatus::OK();
+  }
+
+  // NeuroPilot < 9: general extension operation, selected by its name operand
+  const std::string ext_name = "MTKEXT_GRID_SAMPLE_2D";
+  uint32_t mtkext_operand_index = 0;
+  const auto mtkext_operand_name = model_builder.GetUniqueName(node.name() + "_mtkext");
+  NEURON_RETURN_IF_ERROR(model_builder.AddCustomNameStringOperand(
+      ext_name, mtkext_operand_name, mtkext_operand_index));
+  input_indices.push_back(operand_indices.at(mtkext_operand_name));
+
+  NeuronOperationType ext_op_type;
+  NEURON_RETURN_IF_ERROR(model_builder.GetExtensionGeneralOperationType(&ext_op_type));
+
+  LOGS_NEURON(VERBOSE) << "GridSample: emitting " << ext_name;
+
+  NEURON_RETURN_IF_ERROR(model_builder.AddOperation(ext_op_type,
                                                      input_indices,
                                                      {y},
                                                      {output_operand_type}));

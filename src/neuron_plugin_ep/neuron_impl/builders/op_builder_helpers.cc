@@ -969,9 +969,15 @@ NeuronStatus GetAxesForSqueezeAndUnSqueeze(ModelBuilder& model_builder, const on
     const auto& axes_name = node.input(1);
     if (initializers.count(axes_name)) {
       const auto& axes_tensor = *initializers.at(axes_name);
+      // exporters often store small INT64 constants in raw_data
       std::vector<int64_t> raw_axes;
-      for (auto v : axes_tensor.int64_data()) raw_axes.push_back(v);
+      NEURON_RETURN_IF_ERROR(NeuronGraphContext::GetInt64Data(axes_tensor, raw_axes));
+      NEURON_RETURN_IF_NOT(!raw_axes.empty() || node.op_type() == "Squeeze",
+                           "Unsqueeze: axes initializer '", axes_name, "' is empty");
       axes = OnnxAxesToNeuron(gsl::make_span(raw_axes), std::nullopt);
+    } else {
+      NEURON_RETURN_IF_NOT(node.op_type() == "Squeeze",
+                           "Unsqueeze: axes input '", axes_name, "' is not a constant initializer");
     }
   } else {
     // Opset < 13: axes from the "axes" attribute.
