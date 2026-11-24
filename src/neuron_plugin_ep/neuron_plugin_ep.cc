@@ -11,6 +11,7 @@
 #undef ORT_API_MANUAL_INIT
 
 #include "neuron_ep_factory.h"
+#include "neuron_impl/neuron_lib/neuron_implementation.h"
 #include "neuron_impl/op_capability_abi/op_capability_loader.h"
 
 // -fvisibility=hidden (from CXX_VISIBILITY_PRESET) hides all symbols at
@@ -79,7 +80,18 @@ EXPORT_SYMBOL OrtStatus* CreateEpFactories(
     }
   }
 
-  // 5. Create the factory.  The EP name is NeuronEpFactory::kEpName, not the
+  // 5. The Neuron runtime must be present and expose an NPU device. Refuse to
+  //    register on a device without one, so applications can fall back to
+  //    another EP instead of failing later at session creation.
+  {
+    const NeuronApi* neuron = NeuronApiImplementation();
+    if (!neuron || !neuron->neuron_exists) {
+      return ort_api->CreateStatus(ORT_EP_FAIL,
+                                    "NeuronEP: the Neuron runtime or an NPU device was not found on this device.");
+    }
+  }
+
+  // 6. Create the factory.  The EP name is NeuronEpFactory::kEpName, not the
   //    registration name.
   auto factory = std::make_unique<NeuronEpFactory>(
       ApiPtrs{*ort_api, *ep_api, *model_editor_api, ort_api_version},

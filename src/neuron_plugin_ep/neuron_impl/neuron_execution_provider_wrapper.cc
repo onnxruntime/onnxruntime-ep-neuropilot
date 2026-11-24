@@ -1457,7 +1457,10 @@ NeuronWrapperHandle NeuronWrapper_Create(
 
   // Neuron SDK handle.
   s->neuron_handle = NeuronApiImplementation();
-  if (!s->neuron_handle) { delete s; return nullptr; }
+  if (!s->neuron_handle || !s->neuron_handle->neuron_exists ||
+      !s->neuron_handle->Neuron_getVersion) {
+    delete s; return nullptr;
+  }
   if (s->neuron_handle->Neuron_getVersion(&s->neuron_version) != NEURON_NO_ERROR) {
     delete s; return nullptr;
   }
