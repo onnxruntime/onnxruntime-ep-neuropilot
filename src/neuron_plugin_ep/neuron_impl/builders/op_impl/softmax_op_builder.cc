@@ -79,7 +79,8 @@ NeuronStatus SoftMaxOpBuilder::AddToModelBuilderImpl(
   std::vector<uint32_t> input_indices;
   input_indices.push_back(operand_indices.at(softmax_input));
   const float beta = 1.0f;
-  ADD_SCALAR_OPERAND(model_builder, input_indices, beta);
+  NEURON_RETURN_IF_ERROR(AddFloatScalarOperandFor(model_builder, input_indices, beta,
+                                                  operand_types.at(softmax_input).type));
   ADD_SCALAR_OPERAND(model_builder, input_indices, axis);
 
   // For a QDQ softmax (DQ→Softmax→Q) the output operand must carry the Q node's

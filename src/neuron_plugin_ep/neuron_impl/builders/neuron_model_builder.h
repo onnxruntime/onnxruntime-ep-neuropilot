@@ -98,6 +98,9 @@ class ModelBuilder {
   NeuronStatus AddOperandFromScalar(bool value, uint32_t& index);
   NeuronStatus AddOperandFromScalar(float value, uint32_t& index);
   NeuronStatus AddOperandFromScalar(int32_t value, uint32_t& index);
+  // A FLOAT16 scalar, as the Neuron API wants for the float scalars (softmax beta, ...) of a
+  // TENSOR_FLOAT16 operation; a 4-byte float there is read as two bytes and gives 0.
+  NeuronStatus AddOperandFromFloat16Scalar(float value, uint32_t& index);
 
   // Tensor operand helpers.
   NeuronStatus AddOperandFromPersistMemoryBuffer(

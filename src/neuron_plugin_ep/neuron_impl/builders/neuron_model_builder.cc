@@ -87,6 +87,41 @@ DEFINE_ADD_OPERAND_FROM_SCALAR(int32_t, INT32)
 DEFINE_ADD_OPERAND_FROM_SCALAR(float, FLOAT32)
 #undef DEFINE_ADD_OPERAND_FROM_SCALAR
 
+// float -> IEEE half bits (round to nearest even; overflow gives inf, tiny values flush to 0).
+static uint16_t FloatToHalfBits(float f) {
+  uint32_t x;
+  memcpy(&x, &f, sizeof(x));
+  const uint32_t sign = (x >> 16) & 0x8000u;
+  const int32_t exp = static_cast<int32_t>((x >> 23) & 0xFF) - 127 + 15;
+  uint32_t mant = x & 0x7FFFFFu;
+  if (((x >> 23) & 0xFF) == 0xFF) return static_cast<uint16_t>(sign | 0x7C00u | (mant ? 0x200u : 0u));
+  if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u);
+  if (exp <= 0) {
+    if (exp < -10) return static_cast<uint16_t>(sign);
+    mant |= 0x800000u;
+    const uint32_t shift = static_cast<uint32_t>(14 - exp);
+    uint32_t half = mant >> shift;
+    const uint32_t rem = mant & ((1u << shift) - 1u), mid = 1u << (shift - 1);
+    if (rem > mid || (rem == mid && (half & 1u))) ++half;
+    return static_cast<uint16_t>(sign | half);
+  }
+  uint32_t half = (static_cast<uint32_t>(exp) << 10) | (mant >> 13);
+  const uint32_t rem = mant & 0x1FFFu;
+  if (rem > 0x1000u || (rem == 0x1000u && (half & 1u))) ++half;
+  return static_cast<uint16_t>(sign | half);
+}
+
+NeuronStatus ModelBuilder::AddOperandFromFloat16Scalar(float value, uint32_t& index) {
+  OperandType operandType(Type::FLOAT16, std::vector<uint32_t>{});
+  NEURON_RETURN_IF_ERROR(AddNewNeuronOperand(operandType, index));
+  const uint16_t bits = FloatToHalfBits(value);
+  NEURON_RETURN_STATUS_ON_ERROR_WITH_NOTE(
+      neuron_.NeuronModel_setOperandValue(neuron_model_->model_, index, &bits, sizeof(bits)),
+      "value: " + std::to_string(value));
+  LOGS_NEURON(VERBOSE) << "Set FLOAT16 Scalar Operand index: " << index << " value: " << value;
+  return NeuronStatus::OK();
+}
+
 // ---------------------------------------------------------------------------
 // AddInitializerToSkip
 // ---------------------------------------------------------------------------
