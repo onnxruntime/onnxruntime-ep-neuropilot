@@ -106,7 +106,7 @@ bool ConcatOpBuilder::HasSupportedInputsImpl(
   const int input_size = node.input_size();
   for (int i = 0; i < input_size; i++) {
     if (!IsTypeSupported(node, ctx, static_cast<size_t>(i), /*is_input*/ true,
-                         {onnx::TensorProto::FLOAT}) &&
+                         {onnx::TensorProto::FLOAT, onnx::TensorProto::FLOAT16}) &&
         !IsTypeSupported(node, ctx, static_cast<size_t>(i), /*is_input*/ true,
                          {onnx::TensorProto::UINT8,
                           onnx::TensorProto::INT8})) {
@@ -114,7 +114,7 @@ bool ConcatOpBuilder::HasSupportedInputsImpl(
     }
   }
   if (!IsTypeSupported(node, ctx, 0, /*is_input*/ false,
-                       {onnx::TensorProto::FLOAT}) &&
+                       {onnx::TensorProto::FLOAT, onnx::TensorProto::FLOAT16}) &&
       !IsTypeSupported(node, ctx, 0, /*is_input*/ false,
                        {onnx::TensorProto::UINT8,
                         onnx::TensorProto::INT8})) {

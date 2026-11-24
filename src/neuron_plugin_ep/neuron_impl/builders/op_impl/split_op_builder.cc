@@ -42,6 +42,7 @@ class SplitOpBuilder : public BaseOpBuilder {
                                      const OpSupportCheckParams& /*params*/) const override {
     return IsTypeSupported(node, ctx, 0, /*is_input*/ true,
                            {onnx::TensorProto::FLOAT,
+                            onnx::TensorProto::FLOAT16,
                             onnx::TensorProto::UINT8});
   }
 
