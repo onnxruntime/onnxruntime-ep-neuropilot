@@ -164,9 +164,10 @@ bool PoolOpBuilder::HasSupportedInputsImpl(
     return BaseOpBuilder::HasSupportedInputsImpl(node, ctx, params);
   }
 
-  // MaxPool supports float and uint8 input
+  // MaxPool supports float, fp16 and uint8 input
   return IsTypeSupported(node, ctx, 0, /*is_input*/ true,
                          {onnx::TensorProto::FLOAT,
+                          onnx::TensorProto::FLOAT16,
                           onnx::TensorProto::UINT8});
 }
 
