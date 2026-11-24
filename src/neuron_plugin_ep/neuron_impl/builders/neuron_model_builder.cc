@@ -87,6 +87,27 @@ DEFINE_ADD_OPERAND_FROM_SCALAR(int32_t, INT32)
 DEFINE_ADD_OPERAND_FROM_SCALAR(float, FLOAT32)
 #undef DEFINE_ADD_OPERAND_FROM_SCALAR
 
+static float HalfBitsToFloat(uint16_t h) {
+  const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+  uint32_t exp = (h >> 10) & 0x1Fu, mant = h & 0x3FFu, bits;
+  if (exp == 0) {
+    if (mant == 0) {
+      bits = sign;
+    } else {  // subnormal half: normalize
+      exp = 127 - 15 + 1;
+      while (!(mant & 0x400u)) { mant <<= 1; --exp; }
+      bits = sign | (exp << 23) | ((mant & 0x3FFu) << 13);
+    }
+  } else if (exp == 31) {
+    bits = sign | 0x7F800000u | (mant << 13);
+  } else {
+    bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+  }
+  float f;
+  memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+
 // float -> IEEE half bits (round to nearest even; overflow gives inf, tiny values flush to 0).
 static uint16_t FloatToHalfBits(float f) {
   uint32_t x;
@@ -1033,6 +1054,18 @@ NeuronStatus ModelBuilder::AddOperandFromConstantInitializer(
       NEURON_RETURN_IF_ERROR(DequantizeInitializerToBuffer<int32_t>(
           *initializer, type_info.scales, type_info.zero_points, axis, float_buffer));
       break;
+    case onnx::TensorProto::FLOAT16: {
+      // Not quantized: just widen the half-precision values to float32.
+      const std::vector<uint8_t> raw = GetTensorRawBytes(*initializer);
+      const size_t n = raw.size() / sizeof(uint16_t);
+      float_buffer.resize(n);
+      for (size_t i = 0; i < n; ++i) {
+        uint16_t h;
+        memcpy(&h, raw.data() + i * sizeof(h), sizeof(h));
+        float_buffer[i] = HalfBitsToFloat(h);
+      }
+      break;
+    }
     default:
       return NeuronStatus{false, MakeNeuronString(
           "Cannot dequantize initializer of type: ",

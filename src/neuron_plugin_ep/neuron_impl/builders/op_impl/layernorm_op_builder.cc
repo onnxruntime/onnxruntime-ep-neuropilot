@@ -56,6 +56,7 @@ bool LayerNormalizationOpBuilder::HasSupportedInputsImpl(
     const OpSupportCheckParams& params) const {
   return IsTypeSupported(node, ctx, 0, /*is_input*/ true,
                          {onnx::TensorProto::FLOAT,
+                          onnx::TensorProto::FLOAT16,
                           onnx::TensorProto::UINT8,
                           onnx::TensorProto::INT8});
 }
@@ -72,8 +73,18 @@ NeuronStatus LayerNormalizationOpBuilder::AddToModelBuilderImpl(
 
   const int32_t input_elem_type = ctx.GetElementType(input);
 
-  // If input is not float32, dequantize to float32 first.
-  if (input_elem_type != onnx::TensorProto::FLOAT) {
+  // The MTK extension op works on float32.  An fp16 input is cast up first and
+  // the result cast back down below.
+  const bool is_fp16 = input_elem_type == onnx::TensorProto::FLOAT16;
+  if (is_fp16) {
+    const std::string mediate_input = model_builder.GetUniqueName(output + "_fp32_mediate");
+    shaper.AddShape(mediate_input, shaper[input]);
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperation(
+        NEURON_CAST, {operand_indices.at(input)}, {mediate_input},
+        {OperandType(Type::TENSOR_FLOAT32, shaper[input])}));
+    input = mediate_input;
+  } else if (input_elem_type != onnx::TensorProto::FLOAT) {
+    // Input is quantized: dequantize to float32 first.
     const std::string mediate_input = model_builder.GetUniqueName(output + "_quant_mediate");
     shaper.AddShape(mediate_input, shaper[input]);
 
@@ -144,7 +155,16 @@ NeuronStatus LayerNormalizationOpBuilder::AddToModelBuilderImpl(
 
   const int32_t output_elem_type = ctx.GetElementType(output);
 
-  if (output_elem_type != onnx::TensorProto::FLOAT) {
+  if (output_elem_type == onnx::TensorProto::FLOAT16) {
+    const std::string mediate_output = model_builder.GetUniqueName(output + "_fp32_mediate");
+    const OperandType mediate_output_operand_type(Type::FLOAT32, shaper[input]);
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperation(ext_op_type, input_indices,
+                                                      {mediate_output},
+                                                      {mediate_output_operand_type}));
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperation(
+        NEURON_CAST, {operand_indices.at(mediate_output)}, {output},
+        {OperandType(Type::TENSOR_FLOAT16, shaper[input])}));
+  } else if (output_elem_type != onnx::TensorProto::FLOAT) {
     // Output is quantized: write float32 intermediate, then quantize.
     const std::string mediate_output = model_builder.GetUniqueName(output + "_quant_mediate");
     const OperandType mediate_output_operand_type(Type::FLOAT32, shaper[input]);
