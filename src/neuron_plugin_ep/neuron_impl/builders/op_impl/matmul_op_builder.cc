@@ -97,6 +97,13 @@ static bool ShouldLowerAsBatchedFullyConnected(const onnx::NodeProto& node,
 
 class MatMulOpBuilder : public BaseOpBuilder {
  public:
+  // constant-B MatMuls become FULLY_CONNECTED, not the BATCH_MATMUL the
+  // capability library checks (it refuses B batch dims broadcast over A's)
+  bool UsesOwnLowering(const onnx::NodeProto& node,
+                       const NeuronGraphContext& ctx) const override {
+    return ShouldLowerAsFullyConnected(node, ctx) || ShouldLowerAsBatchedFullyConnected(node, ctx);
+  }
+
   void AddInitializersToSkip(ModelBuilder& model_builder,
                               const onnx::NodeProto& node,
                               const NeuronGraphContext& ctx) const override;

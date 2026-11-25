@@ -58,6 +58,13 @@ class IOpBuilder {
   // confirm with the Neuron runtime before claiming: for ops whose support
   // depends on the runtime or the SoC, not on the capability table
   virtual bool RequiresRuntimeProbe(const onnx::NodeProto& /*node*/) const { return false; }
+
+  // The EP lowers this node with a different Neuron op than the one the
+  // capability library judges (e.g. a constant-B MatMul built as
+  // FULLY_CONNECTED, judged as BATCH_MATMUL).  A capability refusal is then
+  // checked again with the runtime probe of the EP's own lowering.
+  virtual bool UsesOwnLowering(const onnx::NodeProto& /*node*/,
+                               const NeuronGraphContext& /*ctx*/) const { return false; }
 };
 
 }  // namespace neuron
