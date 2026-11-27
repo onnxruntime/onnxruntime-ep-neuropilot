@@ -23,6 +23,8 @@
 //   We skip: a_scale(1), a_zp(2), b_scale(4), b_zp(5), y_scale(6), y_zp(7)
 //   and possibly B(3) if the batch-matmul path is not used.
 
+#include <cstring>
+
 #include "base_op_builder.h"
 
 #include <onnx/onnx_pb.h>
@@ -87,7 +89,9 @@ static bool ShouldLowerAsBatchedFullyConnected(const onnx::NodeProto& node,
                                                const NeuronGraphContext& ctx) {
   if (node.op_type() != "MatMul" || node.input_size() < 2) return false;
   const auto* b = ctx.GetInitializer(node.input(1));
-  if (b == nullptr || b->data_type() != onnx::TensorProto::FLOAT || b->dims_size() < 3)
+  if (b == nullptr ||
+      (b->data_type() != onnx::TensorProto::FLOAT && b->data_type() != onnx::TensorProto::FLOAT16) ||
+      b->dims_size() < 3)
     return false;
   const Shape a_shape = ctx.GetShape(node.input(0));
   const size_t rank = a_shape.size();
@@ -200,6 +204,7 @@ bool MatMulOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
   if (params.use_fp16 || IsQuantizedOp(node, ctx)) {
     supported_types.insert(onnx::TensorProto::FLOAT);
   }
+  supported_types.insert(onnx::TensorProto::FLOAT16);
 
   if (!IsTypeSupported(node, ctx, 0, /*is_input*/ true, supported_types)) {
     return false;
@@ -251,6 +256,10 @@ NeuronStatus MatMulOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   int32_t a_zero_point = 0, b_zero_point = 0, y_zero_point = 0;
   bool is_per_tensor_u8s8 = false;
   Type onnx_mat_b_type = Type::TENSOR_FLOAT32;
+  if (const auto* b_init = ctx.GetInitializer(input2);
+      b_init && b_init->data_type() == onnx::TensorProto::FLOAT16) {
+    onnx_mat_b_type = Type::TENSOR_FLOAT16;
+  }
 
   if (is_quant_matmul) {
     std::optional<std::vector<float>> w_scales;
@@ -289,6 +298,10 @@ NeuronStatus MatMulOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   if (bias_type == Type::TENSOR_FLOAT32) {
     std::vector<float> buffer(bias_dimen[0], 0.f);
     OperandType bias_operand_type(Type::TENSOR_FLOAT32, bias_dimen);
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(bias, buffer.data(), bias_operand_type));
+  } else if (bias_type == Type::TENSOR_FLOAT16) {
+    std::vector<uint16_t> buffer(bias_dimen[0], 0);  // fp16 zero is all-zero bits
+    OperandType bias_operand_type(Type::TENSOR_FLOAT16, bias_dimen);
     NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(bias, buffer.data(), bias_operand_type));
   } else if (bias_type == Type::TENSOR_QUANT8_ASYMM) {
     std::vector<int32_t> buffer(bias_dimen[0], 0);
@@ -333,6 +346,10 @@ NeuronStatus MatMulOpBuilder::BuildConstBFullyConnected(
   float a_scale = 0.0f, b_scale = 0.0f, y_scale = 0.0f;
   int32_t a_zero_point = 0, b_zero_point = 0, y_zero_point = 0;
   Type b_type = Type::TENSOR_FLOAT32;
+  if (const auto* b_init = ctx.GetInitializer(actual_b_name);
+      !is_quant && b_init && b_init->data_type() == onnx::TensorProto::FLOAT16) {
+    b_type = Type::TENSOR_FLOAT16;
+  }
   Type out_type = operand_types.at(input1).type;
   const QDQNodeGroup* qdq = is_quant ? ctx.GetQDQGroup(output) : nullptr;
   if (is_quant) {
@@ -407,6 +424,10 @@ NeuronStatus MatMulOpBuilder::BuildConstBFullyConnected(
     std::vector<float> buffer(n_dim, 0.f);
     NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(
         bias, buffer.data(), OperandType(Type::TENSOR_FLOAT32, Shape{n_dim})));
+  } else if (b_type == Type::TENSOR_FLOAT16) {
+    std::vector<uint16_t> buffer(n_dim, 0);
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(
+        bias, buffer.data(), OperandType(Type::TENSOR_FLOAT16, Shape{n_dim})));
   } else {
     // Per NNAPI, a per-channel filter takes an INT32 bias with scale 0 (the
     // driver derives input_scale * filter_scale[i]); per-tensor uses the
@@ -472,16 +493,19 @@ NeuronStatus MatMulOpBuilder::BuildConstBBatchedFullyConnected(
   out_shape.push_back(m);
   out_shape.push_back(n);
 
-  const auto* b_data = static_cast<const float*>(GetRawInitializerData(b));
+  const bool b_fp16 = b.data_type() == onnx::TensorProto::FLOAT16;
+  const Type b_op_type = b_fp16 ? Type::TENSOR_FLOAT16 : Type::TENSOR_FLOAT32;
+  const size_t b_elem = b_fp16 ? sizeof(uint16_t) : sizeof(float);
+  const auto* b_data = static_cast<const uint8_t*>(GetRawInitializerData(b));
   NEURON_RETURN_IF_NOT(b_data != nullptr, "MatMul: constant B '", node.input(1), "' has no data");
   const Type out_type = operand_types.at(a).type;
   const int32_t fuse_code = model_builder.FindActivation(node, ctx);
 
   const std::string bias = model_builder.GetUniqueName(node.name() + "/zero_bias");
   {
-    const std::vector<float> zeros(n, 0.0f);
+    const std::vector<uint8_t> zeros(static_cast<size_t>(n) * b_elem, 0);  // all-zero bits are 0 in fp32 and fp16
     NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(
-        bias, zeros.data(), OperandType(Type::TENSOR_FLOAT32, Shape{n})));
+        bias, zeros.data(), OperandType(b_op_type, Shape{n})));
   }
 
   // FC of a [rows, k] input against slice `s` of B ([k, n] -> weight [n, k]).
@@ -489,13 +513,14 @@ NeuronStatus MatMulOpBuilder::BuildConstBBatchedFullyConnected(
                     const std::string& out) -> NeuronStatus {
     const std::string weight =
         model_builder.GetUniqueName(node.input(1) + "/fc_weight_" + std::to_string(s));
-    const float* src = b_data + static_cast<size_t>(s) * k * n;
-    std::vector<float> transposed(static_cast<size_t>(n) * k);
+    const uint8_t* src = b_data + static_cast<size_t>(s) * k * n * b_elem;
+    std::vector<uint8_t> transposed(static_cast<size_t>(n) * k * b_elem);
     for (uint32_t r = 0; r < k; ++r)
       for (uint32_t c = 0; c < n; ++c)
-        transposed[static_cast<size_t>(c) * k + r] = src[static_cast<size_t>(r) * n + c];
+        std::memcpy(&transposed[(static_cast<size_t>(c) * k + r) * b_elem],
+                    &src[(static_cast<size_t>(r) * n + c) * b_elem], b_elem);
     NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(
-        weight, transposed.data(), OperandType(Type::TENSOR_FLOAT32, Shape{n, k})));
+        weight, transposed.data(), OperandType(b_op_type, Shape{n, k})));
 
     std::vector<uint32_t> input_indices{operand_indices.at(in), operand_indices.at(weight),
                                         operand_indices.at(bias)};

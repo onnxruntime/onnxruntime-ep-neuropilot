@@ -20,9 +20,9 @@ class CastOpBuilder : public BaseOpBuilder {
                                      const NeuronGraphContext& ctx,
                                      const OpSupportCheckParams& /*params*/) const override {
     return (IsTypeSupported(node, ctx, 0, /*is_input*/ true,
-                            {onnx::TensorProto::FLOAT}) &&
+                            {onnx::TensorProto::FLOAT, onnx::TensorProto::FLOAT16}) &&
             IsTypeSupported(node, ctx, 0, /*is_input*/ false,
-                            {onnx::TensorProto::FLOAT})) ||
+                            {onnx::TensorProto::FLOAT, onnx::TensorProto::FLOAT16})) ||
            (IsTypeSupported(node, ctx, 0, /*is_input*/ true,
                             {onnx::TensorProto::UINT32}) &&
             IsTypeSupported(node, ctx, 0, /*is_input*/ false,
@@ -48,6 +48,9 @@ NeuronStatus CastOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   switch (to) {
     case onnx::TensorProto::FLOAT:
       type = Type::TENSOR_FLOAT32;
+      break;
+    case onnx::TensorProto::FLOAT16:
+      type = Type::TENSOR_FLOAT16;
       break;
     case onnx::TensorProto::INT32:
       type = Type::TENSOR_INT32;

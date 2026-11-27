@@ -115,6 +115,21 @@ bool HasRequiredScaleAndZeroPoint(const NeuronGraphContext& ctx, const std::stri
 
 NeuronStatus PerformBroadcasting(const Shape& shape1, const Shape& shape2, Shape& output_shape);
 
+// Adds a float scalar operand typed to match the tensors of the operation it belongs to:
+// FLOAT16 when they are TENSOR_FLOAT16, else FLOAT32.
+inline NeuronStatus AddFloatScalarOperandFor(ModelBuilder& model_builder,
+                                             std::vector<uint32_t>& input_indices,
+                                             float value, wrapper::Type tensor_type) {
+  uint32_t index = 0;
+  if (tensor_type == wrapper::Type::TENSOR_FLOAT16) {
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromFloat16Scalar(value, index));
+  } else {
+    NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromScalar(value, index));
+  }
+  input_indices.push_back(index);
+  return NeuronStatus::OK();
+}
+
 // Template implementations (in header since they must be instantiated here)
 template <typename T>
 NeuronStatus AddScalarOperand(ModelBuilder& model_builder,

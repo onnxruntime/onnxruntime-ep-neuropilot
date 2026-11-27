@@ -33,7 +33,8 @@ NeuronStatus EluOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
 
   std::vector<uint32_t> input_indices;
   input_indices.push_back(operand_indices.at(input));
-  ADD_SCALAR_OPERAND(model_builder, input_indices, alpha);
+  NEURON_RETURN_IF_ERROR(AddFloatScalarOperandFor(model_builder, input_indices, alpha,
+                                                  operand_types.at(input).type));
 
   NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_ELU, input_indices,
                                                      {output}, {output_operand_type}));

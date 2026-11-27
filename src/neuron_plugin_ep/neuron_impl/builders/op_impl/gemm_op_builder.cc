@@ -222,6 +222,9 @@ NeuronStatus GemmOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
     NEURON_RETURN_IF_NOT(mat_b_tensor_ptr != nullptr,
                           "Gemm: B (", input2, ") must be a constant initializer when transB=0");
     const auto& mat_b_tensor = *mat_b_tensor_ptr;
+    if (!is_quant_gemm && mat_b_tensor.data_type() == onnx::TensorProto::FLOAT16) {
+      onnx_mat_b_type = Type::TENSOR_FLOAT16;
+    }
 
     Shape onnx_mat_b_shape;
     for (auto dim : mat_b_tensor.dims())
@@ -312,6 +315,10 @@ NeuronStatus GemmOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
     if (bias_type == Type::TENSOR_FLOAT32) {
       std::vector<float> buffer(bias_dimen[0], 0.f);
       OperandType bias_operand_type(Type::TENSOR_FLOAT32, bias_dimen);
+      NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(bias, buffer.data(), bias_operand_type));
+    } else if (bias_type == Type::TENSOR_FLOAT16) {
+      std::vector<uint16_t> buffer(bias_dimen[0], 0);  // fp16 zero is all-zero bits
+      OperandType bias_operand_type(Type::TENSOR_FLOAT16, bias_dimen);
       NEURON_RETURN_IF_ERROR(model_builder.AddOperandFromPersistMemoryBuffer(bias, buffer.data(), bias_operand_type));
     } else if (bias_type == Type::TENSOR_QUANT8_ASYMM) {
       std::vector<int32_t> buffer(bias_dimen[0], 0);

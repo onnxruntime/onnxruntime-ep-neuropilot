@@ -41,9 +41,10 @@ NeuronStatus LRNOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   std::vector<uint32_t> input_indices;
   input_indices.push_back(operand_indices.at(input));
   ADD_SCALAR_OPERAND(model_builder, input_indices, radius);
-  ADD_SCALAR_OPERAND(model_builder, input_indices, bias);
-  ADD_SCALAR_OPERAND(model_builder, input_indices, alpha);
-  ADD_SCALAR_OPERAND(model_builder, input_indices, beta);
+  const Type lrn_type = model_builder.GetOperandTypes().at(input).type;
+  NEURON_RETURN_IF_ERROR(AddFloatScalarOperandFor(model_builder, input_indices, bias, lrn_type));
+  NEURON_RETURN_IF_ERROR(AddFloatScalarOperandFor(model_builder, input_indices, alpha, lrn_type));
+  NEURON_RETURN_IF_ERROR(AddFloatScalarOperandFor(model_builder, input_indices, beta, lrn_type));
 
   // ONNX LRN is always on the C dimension: axis=1 (NCHW) or axis=3 (NHWC)
   int32_t axis = use_nchw ? 1 : 3;

@@ -169,6 +169,7 @@ bool ResizeOpBuilder::HasSupportedInputsImpl(const onnx::NodeProto& node,
                                                      const OpSupportCheckParams& params) const {
   if (!IsTypeSupported(node, ctx, 0, /*is_input*/ true,
                        {onnx::TensorProto::FLOAT,
+                        onnx::TensorProto::FLOAT16,
                         onnx::TensorProto::UINT8})) {
     return false;
   }
