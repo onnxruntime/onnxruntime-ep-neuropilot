@@ -52,6 +52,8 @@ endif()
 list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
   ANDROID_NDK_HOME ANDROID_ABI ANDROID_PLATFORM)
 
+set(ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES ON)
+
 # android.toolchain.cmake refers to the NDK root as ANDROID_NDK.
 set(ANDROID_NDK "${ANDROID_NDK_HOME}")
 include("${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake")
