@@ -64,7 +64,16 @@ static bool ShouldLowerAsFullyConnected(const onnx::NodeProto& node,
   const auto* b_init = ctx.GetInitializer(b_name);
   if (b_init == nullptr || b_init->dims_size() != 2) return false;
   const Shape a_shape = ctx.GetShape(node.input(0));
-  return a_shape.size() == 2 || (a_shape.size() == 3 && a_shape[0] == 1);
+  if (a_shape.size() < 2) return false;
+  // FC flattens every leading dim of A into rows; any rank works while the
+  // row count stays within MDLA's 65535 dimension limit (e.g. a Linear on an
+  // NHWC map [1, H, W, C] x [C, N]).
+  uint64_t rows = 1;
+  for (size_t i = 0; i + 1 < a_shape.size(); ++i) {
+    if (a_shape[i] == 0) return false;  // static shapes only
+    rows *= a_shape[i];
+  }
+  return rows <= 65535;
 }
 
 // A float MatMul whose B is a constant of rank >= 3 lowers to one
@@ -97,6 +106,13 @@ static bool ShouldLowerAsBatchedFullyConnected(const onnx::NodeProto& node,
 
 class MatMulOpBuilder : public BaseOpBuilder {
  public:
+  // constant-B MatMuls become FULLY_CONNECTED, not the BATCH_MATMUL the
+  // capability library checks (it refuses B batch dims broadcast over A's)
+  bool UsesOwnLowering(const onnx::NodeProto& node,
+                       const NeuronGraphContext& ctx) const override {
+    return ShouldLowerAsFullyConnected(node, ctx) || ShouldLowerAsBatchedFullyConnected(node, ctx);
+  }
+
   void AddInitializersToSkip(ModelBuilder& model_builder,
                               const onnx::NodeProto& node,
                               const NeuronGraphContext& ctx) const override;
@@ -374,15 +390,16 @@ NeuronStatus MatMulOpBuilder::BuildConstBFullyConnected(
                                                     actual_b_name, /*is_per_tensor_u8s8=*/false));
   }
 
-  // A: FC wants [batch, input_size]; unwrap a rank-3 batch-1 A.
+  // A: FC wants [rows, input_size]; flatten every leading dim of a rank > 2 A.
   const Shape a_shape = ctx.GetShape(input1);
-  const bool need_reshape = a_shape.size() == 3;
+  const bool need_reshape = a_shape.size() != 2;
+  uint32_t rows = 1;
+  for (size_t i = 0; i + 1 < a_shape.size(); ++i) rows *= a_shape[i];
   std::string fc_in = input1;
   if (need_reshape) {
     fc_in = model_builder.GetUniqueName(node.name() + "/fc_in");
-    NEURON_RETURN_IF_ERROR(model_builder.AddReshape(input1, {a_shape[1], k_dim}, fc_in));
+    NEURON_RETURN_IF_ERROR(model_builder.AddReshape(input1, {rows, k_dim}, fc_in));
   }
-  const uint32_t rows = need_reshape ? a_shape[1] : a_shape[0];
 
   // Zero bias in the type FC requires.
   const std::string bias = model_builder.GetUniqueName(node.name() + node.op_type() + "_bias");
@@ -419,7 +436,9 @@ NeuronStatus MatMulOpBuilder::BuildConstBFullyConnected(
   const OperandType fc_out_operand(out_type, fc_out_shape, y_scale, y_zero_point);
   NEURON_RETURN_IF_ERROR(model_builder.AddOperation(NEURON_FULLY_CONNECTED, input_indices,
                                                     {fc_out}, {fc_out_operand}));
-  return model_builder.AddReshape(fc_out, {1, a_shape[1], n_dim}, output);
+  Shape out_shape(a_shape.begin(), a_shape.end() - 1);
+  out_shape.push_back(n_dim);
+  return model_builder.AddReshape(fc_out, SqueezeLeadingUnitDims(out_shape), output);
 }
 
 // ---------------------------------------------------------------------------

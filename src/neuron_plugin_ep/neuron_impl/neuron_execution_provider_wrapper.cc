@@ -802,9 +802,33 @@ static std::vector<std::vector<int>> FindSupportedGroups(
 
     // Op-builder support check.
     const auto it = op_builders.find(op);
-    if (it == op_builders.end() ||
-        !it->second->IsOpSupported(node, ctx, check_params)) {
-      continue;
+    if (it == op_builders.end()) continue;
+    if (!it->second->IsOpSupported(node, ctx, check_params)) {
+      // A capability refusal is not final in two cases; the device is asked
+      // about the node instead:
+      //  - the EP lowers the node with a different Neuron op than the one the
+      //    capability library judges (UsesOwnLowering, e.g. constant-B MatMul
+      //    built as FULLY_CONNECTED but judged as BATCH_MATMUL);
+      //  - NCHW bilinear Resize: the library judges it in its current layout,
+      //    but ORT converts it to NHWC only after this EP claims it (preferred
+      //    layout NHWC), so the NHWC form is what the device will run.
+      bool probe_ok = false;
+      if (!state->skip_capability_probe && it->second->UsesOwnLowering(node, ctx)) {
+        std::string reason;
+        probe_ok = RuntimeProbeSupportsNode(graph_proto, ctx, i, state, reason);
+        LOGS_NEURON(INFO) << "Node [" << node.name() << "] " << op << ": the EP's own lowering is "
+                          << (probe_ok ? "supported by the device; claiming it"
+                                       : "declined (" + reason + ")");
+      } else if (op == "Resize" && !state->skip_capability_probe &&
+          !(state->neuron_flags & NEURON_FLAG_USE_NCHW) &&
+          node.domain() != kMSInternalNHWCDomain) {
+        std::string reason;
+        probe_ok = RuntimeProbeSupportsNode(graph_proto, ctx, i, state, reason);
+        LOGS_NEURON(INFO) << "Node [" << node.name() << "] Resize: NHWC form "
+                          << (probe_ok ? "supported by the device; claiming it"
+                                       : "declined (" + reason + ")");
+      }
+      if (!probe_ok) continue;
     }
 
     // the partition probe below skips groups with layout-sensitive ops

@@ -76,10 +76,30 @@ NeuronStatus ReshapeOpBuilder::AddToModelBuilderImpl(
     shape[i] = (dim == 0 && i < input_shape.size()) ? static_cast<int32_t>(input_shape[i]) : dim;
   }
 
+  // Resolve a -1 against the input's element count first: a target such as
+  // [-1, 4, 2, 8, 32] (exporters emit this for x.reshape(B, ...)) has a unit
+  // leading dim only after resolution, and a rank-5 NEURON_RESHAPE left in the
+  // network makes the MDLA compiler log "SBCtx is invalid" yet finish, giving
+  // a network whose outputs fail at execution with NEURON_BAD_DATA.
+  {
+    int64_t total = 1, known = 1;
+    int neg = -1;
+    for (const auto d : input_shape) total *= d;
+    for (size_t i = 0; i < shape.size(); ++i) {
+      if (shape[i] == -1) neg = static_cast<int>(i);
+      else known *= shape[i];
+    }
+    if (neg >= 0 && known > 0 && total % known == 0)
+      shape[static_cast<size_t>(neg)] = static_cast<int32_t>(total / known);
+  }
+
   // A rank>4 target gets its leading unit dims squeezed, matching how the
   // output operand is declared.
   while (shape.size() > 4 && shape.front() == 1)
     shape.erase(shape.begin());
+  if (shape.size() > 4)
+    LOGS_NEURON(WARNING) << "Reshape [" << node.name() << "]: rank-" << shape.size()
+                         << " target after squeezing; MDLA supports rank <= 4";
 
   return AddReshapeOperator(model_builder, node, ctx, input, shape);
 }
